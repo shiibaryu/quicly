@@ -25,6 +25,11 @@ static quicly_context_t ctx;
 
 static quicly_cid_plaintext_t next_cid;
 
+static int is_server(void)
+{
+        return ctx.tls->certificates.count != 0;
+}
+
 static int address_resolver(struct sockaddr *sa,socklen_t *salen,const char *host,const char *port,int family,int type,int proto)
 {
         struct addrinfo hints,*res;
@@ -82,7 +87,125 @@ int tun_alloc(char *dev)
 
 static int run_ipoc(int sock_fd,int tun_fd,quicly_conn_t *client)
 {
-        
+        quicly_conn_t *conns[256] = {client};
+        size_t i;
+        int max_fd;
+        int read_stdin = client != NULL;
+
+        while(1){
+                fd_set readfds;
+                struct timeval tv;
+                do{
+                        int64_t first_timeout = INT64_MAX;
+                        now = ctx.now->cb(ctx.now);
+                        for(i=0;conns[i] != NULL;i++){
+                                int64_t conn_timeout = quicly_get_first_timeout(conns[i]);
+                                if(conn_timeout < first_timeout){
+                                        first_timeout = conn_timeout;
+                                }
+                        }
+                        if(now < first_timeout){
+                                int64_t delta = first_timeout - now;
+                                if(delta > 1000 * 1000){
+                                        delta = 1000 * 1000;
+                                }
+                                tv.tv_sec = delta / 1000;
+                                tv.tv_usec = (delta % 1000) * 1000;
+                        }
+                        else{
+                                tv.tv_sec = 1000;
+                                tv.tv_usec = 0;
+                        }
+                        max_fd = sock_fd >= tun_fd ? sock_fd : tun_fd;
+
+                        FD_ZERO(&readfds);
+                        FD_SET(sock_fd,&readfds);
+                        FD_SET(tun_fd, &readfds);
+
+                }while(select(max_fd + 1,&readfds,NULL,NULL,&tv) == -1 && errno == EINTR);
+                
+                /*read data from tun_fd and pack it in quic packet*/
+                if(FD_ISSET(tun_fd,&readfds)){
+                        uint8_t buff[4096];
+                        struct sockaddr sa;
+                        struct iovec vec = {.iov_base = buff, .iov_len = sizeof(buff)}
+                        struct msghdr msg = {.msg_name = &sa, .msg_namelen = sizeof(sa), .msg_iov = &vec, .msg_iovlen = 1};
+                        ssize_t rret;
+
+                        while(((rret = recvmsg(tun_fd,&msg,0)) == -1 && errno == EINTR)
+                                ;
+                        if(rret > 0){
+                                for(i=0;conns[i] != NULL;++i){
+                                        quicly_datagram_t *dgrams[16];
+                                        size_t num_dgrams = sizeof(dgrams)/sizeof(dgrams[0]);
+                                        dgrams[i]->data->base = vec.buff;
+                                        dgrams[i]->data->len  = sizeof(buff);
+                                        dgrams[i]->salen = sizeof(sa);
+                                        dgrams[i]->sa    = sa;
+                                        int ret = quicly_send(conns[i],dgrams,&num_dgrams);
+                                        switch(ret){
+                                        case 0:{
+                                                size_t j;
+                                                for(j=0;j!=num_dgrams;++j){
+                                                        send_one(sock_fd,dgrams[j]);
+                                                        ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[j]);
+                                                }
+                                        }break;
+                                        case QUICLY_ERROR_FREE_CONNECTION:
+                                                quicly_free(conns[i]);
+                                                memmove(conns + i,conns+i+1,sizeof(conns)-sizeof(conns[0])*(i+1));
+                                                i--;
+                                                if(!is_server())
+                                                        return 0;
+                                                break;
+                                        default:
+                                                fprintf(stderr,"quicly_send returned %d\n",ret);
+                                                return 1;
+                                        }
+                                }
+                        }
+                }
+                else if(FD_ISSET(sock_fd,&readfds){
+                        uint8_t buff[4096];
+                        struct sockaddr sa;
+                        struct iovec vec = {.iov_base = buff, .iov_len = sizeof(buff)}
+                        struct msghdr msg = {.msg_name = &sa, .msg_namelen = sizeof(sa), .msg_iov = &vec, .msg_iovlen = 1};
+                        ssize_t rret;
+
+                        while(((rret = recvmsg(sock_fd,&msg,0)) == -1 && errno == EINTR)
+                                ;
+                        if(rret > 0){
+                                process_msg(client != NULL,conns,&msg,rret);
+                        }
+
+                        for(i=0;conns[i] != NULL;++i){
+                                quicly_datagram_t *dgrams[16];
+                                size_t num_dgrams = sizeof(dgrams)/sizeof(dgrams[0]);
+                                int ret = quicly_send(conns[i],dgrams,&num_dgrams);
+                                switch(ret){
+                                case 0:{
+                                       size_t j;
+                                       for(j=0;j!=num_dgrams;++j){
+                                                send_one(sock_fd,dgrams[j]);
+                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[j]);
+                                                }
+                                        }break;
+                                case QUICLY_ERROR_FREE_CONNECTION:
+                                       quicly_free(conns[i]);
+                                       memmove(conns + i,conns+i+1,sizeof(conns)-sizeof(conns[0])*(i+1));
+                                       i--;
+                                       if(!is_server())
+                                            return 0;
+                                       break;
+                               default:
+                                       fprintf(stderr,"quicly_send returned %d\n",ret);
+                                       return 1;
+                                }
+                       }
+                }
+        }
+
+        return 0;
 }
 int main(int argc,char **argv[])
 {
@@ -94,6 +217,7 @@ int main(int argc,char **argv[])
         char ifname[IFNAMSIZ] = "";
         char buffer[BUFSIZE];
         unsigned short type;
+        unsigned short tun;
         char *host = "127.0.0.1";
         char *port = "4433";
         struct sockaddr sa;
@@ -112,7 +236,7 @@ int main(int argc,char **argv[])
         quicly_amend_ptls_context(ctx.tls);
         ctx.stream_open = &stream_open;
 
-        while((option = getopt(argc,argv,"c:k:i:p:s:hd")) != 0){
+        while((option = getopt(argc,argv,"c:k:i:p:s:hd:v")) != 0){
                 switch(option){
                         case 'c': /* load certificate chain */ {
                                 int ret;
@@ -146,9 +270,6 @@ int main(int argc,char **argv[])
                         case 'h':
                                 usage();
                                 break;
-                        case 's':
-                                type = SERVER;
-                                break;
                 }
         }
         
@@ -179,7 +300,7 @@ int main(int argc,char **argv[])
                exit(1);
         }
         
-        if(type & SERVER){
+        if(is_server()){
                 int reuseaddr = 1;
                 setsocketopt(sock_fd,SOL_SOCKET,SO_REUSEADDR,&reuseaddr,sizeof(reuseaddr));
                 if(bind(sock_fd,(struct sockaddr *)&sa,salen) != 0){
