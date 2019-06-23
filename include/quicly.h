@@ -54,6 +54,8 @@ extern "C" {
 #define QUICLY_STATELESS_RESET_TOKEN_LEN 16
 #define QUICLY_STATELESS_RESET_PACKET_MIN_LEN 39
 
+#define IPOC 0x0002
+
 typedef struct st_quicly_datagram_t {
     ptls_iovec_t data;
     socklen_t salen;
@@ -811,7 +813,7 @@ quicly_datagram_t *quicly_send_stateless_reset(quicly_context_t *ctx, struct soc
 /**
  *
  */
-int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet);
+int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_fd);
 /**
  *
  */

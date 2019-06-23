@@ -574,7 +574,7 @@ static int run_server(struct sockaddr *sa, socklen_t salen)
                         conn = conns[i];
                         break;
                     }
-                }
+                }s
                 if (conn != NULL) {
                     /* existing connection */
                     quicly_receive(conn, &packet);

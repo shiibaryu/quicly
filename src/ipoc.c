@@ -30,6 +30,92 @@ static int is_server(void)
         return ctx.tls->certificates.count != 0;
 }
 
+static void usage(const char *progname)
+{
+    printf("Usage: %s [options] [host]\n"
+           "Options:\n"
+           "  -c <file>    specifies the certificate chain file (PEM format)\n"
+           "  -k <file>    specifies the private key file (PEM format)\n"
+           "  -p <number>  specifies the port number (default: 4433)\n"
+           "  -E           logs events to stderr\n"
+           "  -h           prints this help\n"
+           "\n"
+           "When both `-c` and `-k` is specified, runs as a server.  Otherwise, runs as a\n"
+           "client connecting to host:port.  If omitted, host defaults to 127.0.0.1.\n",
+           progname);
+    exit(0);
+}
+static int on_stop_sending(quicly_stream_t *stream, int err)
+{
+    fprintf(stderr, "received STOP_SENDING: %" PRIu16 "\n", QUICLY_ERROR_GET_ERROR_CODE(err));
+    quicly_close(stream->conn, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(0), "");
+    return 0;
+}
+
+static int on_receive_reset(quicly_stream_t *stream, int err)
+{
+    fprintf(stderr, "received RESET_STREAM: %" PRIu16 "\n", QUICLY_ERROR_GET_ERROR_CODE(err));
+    quicly_close(stream->conn, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(0), "");
+    return 0;
+}
+
+static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len)
+{
+    int ret;
+
+    /* read input to receive buffer */
+    if ((ret = quicly_streambuf_ingress_receive(stream, off, src, len)) != 0)
+        return ret;
+
+    /* obtain contiguous bytes from the receive buffer */
+    ptls_iovec_t input = quicly_streambuf_ingress_get(stream);
+
+    if (is_server()) {
+        /* server: echo back to the client */
+        if (quicly_sendstate_is_open(&stream->sendstate)) {
+            quicly_streambuf_egress_write(stream, input.base, input.len);
+            /* shutdown the stream after echoing all data */
+            if (quicly_recvstate_transfer_complete(&stream->recvstate))
+                quicly_streambuf_egress_shutdown(stream);
+        }
+    } else {
+        /* client: print to stdout */
+        fwrite(input.base, 1, input.len, stdout);
+        fflush(stdout);
+        /* initiate connection close after receiving all data */
+        if (quicly_recvstate_transfer_complete(&stream->recvstate))
+            quicly_close(stream->conn, 0, "");
+    }
+
+    /* remove used bytes from receive buffer */
+    quicly_streambuf_ingress_shift(stream, input.len);
+
+    return 0;
+}
+
+static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg, size_t dgram_len)
+{
+    size_t off, packet_len, i;
+
+    /* split UDP datagram into multiple QUIC packets */
+    for (off = 0; off < dgram_len; off += packet_len) {
+        quicly_decoded_packet_t decoded;
+        if ((packet_len = quicly_decode_packet(&ctx, &decoded,msg->msg_iov[0].iov_base + off, dgram_len - off)) == SIZE_MAX)
+            return;
+        /* find the corresponding connection (TODO handle version negotiation, rebinding, retry, etc.) */
+        for (i = 0; conns[i] != NULL; ++i)
+            if (quicly_is_destination(conns[i], msg->msg_name, msg->msg_namelen, &decoded))
+                break;
+        if (conns[i] != NULL) {
+            /* let the current connection handle ingress packets */
+            quicly_receive(conns[i], &decoded,tun_fd);
+        } else if (!is_client) {
+            /* assume that the packet is a new connection */
+            quicly_accept(conns + i, &ctx, msg->msg_name, msg->msg_namelen, &decoded, ptls_iovec_init(NULL, 0), &next_cid, NULL);
+        }
+    }
+}
+
 static int address_resolver(struct sockaddr *sa,socklen_t *salen,const char *host,const char *port,int family,int type,int proto)
 {
         struct addrinfo hints,*res;
@@ -85,6 +171,17 @@ int tun_alloc(char *dev)
         return fd;
 }
 
+static int send_one(int fd, quicly_datagram_t *p)
+{
+    struct iovec vec = {.iov_base = p->data.base, .iov_len = p->data.len};
+    struct msghdr mess = {.msg_name = &p->sa, .msg_namelen = p->salen, .msg_iov = &vec, .msg_iovlen = 1};
+    int ret;
+
+    while ((ret = (int)sendmsg(fd, &mess, 0)) == -1 && errno == EINTR)
+        ;
+    return ret;
+}
+
 static int run_ipoc(int sock_fd,int tun_fd,quicly_conn_t *client)
 {
         quicly_conn_t *conns[256] = {client};
@@ -126,30 +223,34 @@ static int run_ipoc(int sock_fd,int tun_fd,quicly_conn_t *client)
                 
                 /*read data from tun_fd and pack it in quic packet*/
                 if(FD_ISSET(tun_fd,&readfds)){
-                        uint8_t buff[4096];
+                        uint8_t buf[1500];
+                        struct msghdr mess;
                         struct sockaddr sa;
-                        struct iovec vec = {.iov_base = buff, .iov_len = sizeof(buff)}
-                        struct msghdr msg = {.msg_name = &sa, .msg_namelen = sizeof(sa), .msg_iov = &vec, .msg_iovlen = 1};
+                        struct iovec vec;
+                        memset(&mess, 0, sizeof(mess));
+                        mess.msg_name = &sa;
+                        mess.msg_namelen = sizeof(sa);
+                        vec.iov_base = buf;
+                        vec.iov_len = sizeof(buf);
+                        mess.msg_iov = &vec;
+                        mess.msg_iovlen = 1;
+                        int x;
                         ssize_t rret;
 
                         while(((rret = recvmsg(tun_fd,&msg,0)) == -1 && errno == EINTR)
                                 ;
                         if(rret > 0){
                                 for(i=0;conns[i] != NULL;++i){
-                                        quicly_datagram_t *dgrams[16];
-                                        size_t num_dgrams = sizeof(dgrams)/sizeof(dgrams[0]);
-                                        dgrams[i]->data->base = vec.buff;
-                                        dgrams[i]->data->len  = sizeof(buff);
-                                        dgrams[i]->salen = sizeof(sa);
-                                        dgrams[i]->sa    = sa;
-                                        int ret = quicly_send(conns[i],dgrams,&num_dgrams);
+                                        quicly_datagram_t *dgrams;
+                                        dgrams->data->base = buf;
+                                        dgrams->data->len = sizeof(buf);
+                                        size_t num_dgrams = 1;
+                                        int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
                                         switch(ret){
                                         case 0:{
-                                                size_t j;
-                                                for(j=0;j!=num_dgrams;++j){
-                                                        send_one(sock_fd,dgrams[j]);
-                                                        ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[j]);
-                                                }
+                                                send_one(sock_fd,dgrams);
+                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams);
+                                                
                                         }break;
                                         case QUICLY_ERROR_FREE_CONNECTION:
                                                 quicly_free(conns[i]);
@@ -165,30 +266,37 @@ static int run_ipoc(int sock_fd,int tun_fd,quicly_conn_t *client)
                                 }
                         }
                 }
-                else if(FD_ISSET(sock_fd,&readfds){
-                        uint8_t buff[4096];
+                if(FD_ISSET(sock_fd,&readfds){
+                        uint8_t buf[1500];
+                        struct msghdr mess;
                         struct sockaddr sa;
-                        struct iovec vec = {.iov_base = buff, .iov_len = sizeof(buff)}
-                        struct msghdr msg = {.msg_name = &sa, .msg_namelen = sizeof(sa), .msg_iov = &vec, .msg_iovlen = 1};
+                        struct iovec vec;
+                        memset(&mess, 0, sizeof(mess));
+                        mess.msg_name = &sa;
+                        mess.msg_namelen = sizeof(sa);
+                        vec.iov_base = buf;
+                        vec.iov_len = sizeof(buf);
+                        mess.msg_iov = &vec;
+                        mess.msg_iovlen = 1;
                         ssize_t rret;
 
                         while(((rret = recvmsg(sock_fd,&msg,0)) == -1 && errno == EINTR)
                                 ;
                         if(rret > 0){
                                 process_msg(client != NULL,conns,&msg,rret);
+                                if(??? == IPOC){
+                                        send_one(tun_fd,dgrams);
+                                }
                         }
-
+                        
                         for(i=0;conns[i] != NULL;++i){
-                                quicly_datagram_t *dgrams[16];
-                                size_t num_dgrams = sizeof(dgrams)/sizeof(dgrams[0]);
+                                quicly_datagram_t *dgrams;
+                                size_t num_dgrams = 1;
                                 int ret = quicly_send(conns[i],dgrams,&num_dgrams);
                                 switch(ret){
                                 case 0:{
-                                       size_t j;
-                                       for(j=0;j!=num_dgrams;++j){
                                                 send_one(sock_fd,dgrams[j]);
                                                 ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[j]);
-                                                }
                                         }break;
                                 case QUICLY_ERROR_FREE_CONNECTION:
                                        quicly_free(conns[i]);
