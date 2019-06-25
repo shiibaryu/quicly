@@ -284,9 +284,6 @@ static int run_ipoc(int sock_fd,int tun_fd,quicly_conn_t *client)
                                 ;
                         if(rret > 0){
                                 process_msg(client != NULL,conns,&msg,rret);
-                                if(??? == IPOC){
-                                        send_one(tun_fd,dgrams);
-                                }
                         }
                         
                         for(i=0;conns[i] != NULL;++i){
