@@ -4203,7 +4203,7 @@ int ipoc_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_fd
     ptls_cipher_context_t *header_protection;
     ptls_aead_context_t **aead;
     struct st_quicly_pn_space_t **space;
-    struct iphdr *ip;
+    struct iphdr *iphdr;
     size_t epoch;
     ptls_iovec_t payload;
     uint64_t pn, offending_frame_type = QUICLY_FRAME_TYPE_PADDING;
@@ -4369,7 +4369,7 @@ int ipoc_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_fd
         conn->super.peer.address_validation.validated = 1;
     }
 
-    iphdr = (struct *iphdr)(payload.base + sizeof(struct ethhdr));
+    iphdr = (struct iphdr *)(payload.base + sizeof(struct ethhdr));
     if(iphdr->saddr == host){
         int ret;
         ret = write(tun_fd,payload.base,payload.len);
