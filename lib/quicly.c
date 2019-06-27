@@ -22,6 +22,9 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <net/ethernet.h>
+#include <unistd.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -4184,6 +4187,7 @@ int ipoc_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_fd
     ptls_cipher_context_t *header_protection;
     ptls_aead_context_t **aead;
     struct st_quicly_pn_space_t **space;
+    struct iphdr *iphdr;
     size_t epoch;
     ptls_iovec_t payload;
     uint64_t pn, offending_frame_type = QUICLY_FRAME_TYPE_PADDING;
