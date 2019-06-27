@@ -48,7 +48,7 @@ extern "C" {
 #define QUICLY_LONG_HEADER_BIT 0x80
 #define QUICLY_PACKET_IS_LONG_HEADER(first_byte) (((first_byte)&QUICLY_LONG_HEADER_BIT) != 0)
 
-#define QUICLY_PROTOCOL_VERSION 0xff000012
+#define QUICLY_PROTOCOL_VERSION 0xff000014
 
 #define QUICLY_MAX_CID_LEN 18
 #define QUICLY_STATELESS_RESET_TOKEN_LEN 16
@@ -84,8 +84,7 @@ typedef enum en_quicly_event_type_t {
     QUICLY_EVENT_TYPE_CRYPTO_DECRYPT,
     QUICLY_EVENT_TYPE_CRYPTO_HANDSHAKE,
     QUICLY_EVENT_TYPE_CRYPTO_UPDATE_SECRET,
-    QUICLY_EVENT_TYPE_CC_TLP,
-    QUICLY_EVENT_TYPE_CC_RTO,
+    QUICLY_EVENT_TYPE_PTO,
     QUICLY_EVENT_TYPE_CC_ACK_RECEIVED,
     QUICLY_EVENT_TYPE_CC_CONGESTION,
     QUICLY_EVENT_TYPE_STREAM_SEND,
@@ -149,9 +148,9 @@ typedef enum en_quicly_event_attribute_type_t {
     QUICLY_EVENT_ATTRIBUTE_END_OF_RECOVERY,
     QUICLY_EVENT_ATTRIBUTE_BYTES_IN_FLIGHT,
     QUICLY_EVENT_ATTRIBUTE_CWND,
+    QUICLY_EVENT_ATTRIBUTE_NUM_PTO,
     QUICLY_EVENT_ATTRIBUTE_NEWLY_ACKED,
     QUICLY_EVENT_ATTRIBUTE_FIRST_OCTET,
-    QUICLY_EVENT_ATTRIBUTE_CC_TYPE,
     QUICLY_EVENT_ATTRIBUTE_CC_END_OF_RECOVERY,
     QUICLY_EVENT_ATTRIBUTE_CC_EXIT_RECOVERY,
     QUICLY_EVENT_ATTRIBUTE_ACKED_PACKETS,
@@ -239,29 +238,19 @@ typedef struct st_quicly_cid_encryptor_t {
  */
 typedef struct st_quicly_stream_scheduler_t {
     /**
-     * returns if there's any data to send.  When `including_new_data` is set to true, the scheduler returns if there is any stream
-     * that have been registered.  When set to false, the scheduler should return if there is any stream registered by the
-     * `set_non_new_data` callback.
+     * returns if there's any data to send.
+     * @param conn_is_flow_capped if the connection-level flow control window is currently saturated
      */
-    int (*can_send)(struct st_quicly_stream_scheduler_t *sched, quicly_conn_t *conn, int including_new_data);
+    int (*can_send)(struct st_quicly_stream_scheduler_t *sched, quicly_conn_t *conn, int conn_is_saturated);
     /**
      * Called by quicly to emit stream data.  The scheduler should repeatedly choose a stream and call `quicly_send_stream` until
      * `quicly_can_send_stream` returns false.
      */
     int (*do_send)(struct st_quicly_stream_scheduler_t *sched, quicly_conn_t *conn, quicly_send_context_t *s);
     /**
-     * Called by quicly to unregister a stream from the scheduler when there's nothing to be sent immediately on that stream.
+     *
      */
-    void (*clear)(struct st_quicly_stream_scheduler_t *sched, quicly_stream_t *stream);
-    /**
-     * Called by quicly to notify the scheduler that the stream has new data to be sent.
-     */
-    void (*set_new_data)(struct st_quicly_stream_scheduler_t *sched, quicly_stream_t *stream);
-    /**
-     * Called by quicly to notify the scheduler that the stream has something other than new data to be sent (i.e. retransmits or
-     * FIN-only).
-     */
-    void (*set_non_new_data)(struct st_quicly_stream_scheduler_t *sched, quicly_stream_t *stream);
+    int (*update_state)(struct st_quicly_stream_scheduler_t *sched, quicly_stream_t *stream);
 } quicly_stream_scheduler_t;
 
 /**
@@ -300,7 +289,7 @@ typedef struct st_quicly_transport_parameters_t {
      */
     uint64_t max_data;
     /**
-     * in seconds
+     * in milliseconds
      */
     uint64_t idle_timeout;
     /**
@@ -368,7 +357,7 @@ struct st_quicly_context_t {
     /**
      * loss detection parameters
      */
-    quicly_loss_conf_t *loss;
+    quicly_loss_conf_t loss;
     /**
      * transport parameters
      */
@@ -448,18 +437,45 @@ struct st_quicly_conn_streamgroup_state_t {
     quicly_stream_id_t next_stream_id;
 };
 
+/**
+ * Values that do not need to be gathered upon the invocation of `quicly_get_stats`. We use typedef to define the same fields in
+ * the same order for quicly_stats_t and `struct st_quicly_public_conn_t::stats`.
+ */
+#define QUICLY_STATS_PREBUILT_FIELDS                                                                                               \
+    struct {                                                                                                                       \
+        uint64_t received;                                                                                                         \
+        uint64_t sent;                                                                                                             \
+        uint64_t lost;                                                                                                             \
+        uint64_t ack_received;                                                                                                     \
+    } num_packets;                                                                                                                 \
+    struct {                                                                                                                       \
+        uint64_t received;                                                                                                         \
+        uint64_t sent;                                                                                                             \
+    } num_bytes
+
 typedef struct st_quicly_stats_t {
-    struct {
-        uint64_t received;
-        uint64_t sent;
-        uint64_t lost;
-        uint64_t ack_received;
-    } num_packets;
-    struct {
-        uint64_t received;
-        uint64_t sent;
-    } num_bytes;
+    /**
+     * The pre-built fields. This MUST be the first member of `quicly_stats_t` so that we can use `memcpy`.
+     */
+    QUICLY_STATS_PREBUILT_FIELDS;
+    /**
+     * RTT
+     */
+    quicly_rtt_t rtt;
 } quicly_stats_t;
+
+/**
+ * The state of the default stream scheduler.
+ * `active` is a linked-list of streams for which STREAM frames can be emitted.  `blocked` is a linked-list of streams that have
+ * something to be sent but are currently blocked by the connection-level flow control.
+ * When the `can_send` callback of the default stream scheduler is invoked with the `conn_is_saturated` flag set, connections that
+ * are blocked are eventually moved to the `blocked` list. When the callback is invoked without the flag being set, all the
+ * connections in the `blocked` list is moved to the `active` list and the `in_saturated_mode` is cleared.
+ */
+struct st_quicly_default_scheduler_state_t {
+    quicly_linklist_t active;
+    quicly_linklist_t blocked;
+};
 
 struct _st_quicly_conn_public_t {
     quicly_context_t *ctx;
@@ -502,11 +518,10 @@ struct _st_quicly_conn_public_t {
             unsigned send_probe : 1;
         } address_validation;
     } peer;
+    struct st_quicly_default_scheduler_state_t _default_scheduler;
     struct {
-        quicly_linklist_t new_data;
-        quicly_linklist_t non_new_data;
-    } _default_scheduler;
-    quicly_stats_t stats;
+        QUICLY_STATS_PREBUILT_FIELDS;
+    } stats;
     uint32_t version;
     void *data;
 };
@@ -750,7 +765,11 @@ static int quicly_is_client(quicly_conn_t *conn);
 /**
  *
  */
-static quicly_stream_id_t quicly_get_next_stream_id(quicly_conn_t *conn, int uni);
+static quicly_stream_id_t quicly_get_host_next_stream_id(quicly_conn_t *conn, int uni);
+/**
+ *
+ */
+static quicly_stream_id_t quicly_get_peer_next_stream_id(quicly_conn_t *conn, int uni);
 /**
  *
  */
@@ -758,7 +777,7 @@ static void quicly_get_peername(quicly_conn_t *conn, struct sockaddr **sa, sockl
 /**
  *
  */
-static quicly_stats_t *quicly_get_stats(quicly_conn_t *conn);
+int quicly_get_stats(quicly_conn_t *conn, quicly_stats_t *stats);
 /**
  *
  */
@@ -782,12 +801,17 @@ int quicly_close(quicly_conn_t *conn, int err, const char *reason_phrase);
  */
 int64_t quicly_get_first_timeout(quicly_conn_t *conn);
 /**
- * checks if quicly_send_stream can be invoked
+ * returns if the connection is currently capped by connection-level flow control.
  */
-int quicly_can_send_stream_data(quicly_conn_t *conn, quicly_send_context_t *s, int new_data);
+int quicly_is_flow_capped(quicly_conn_t *conn);
 /**
- * sends data of given stream. Called by stream scheduler.  Prior to calling the function each time, the scheduler should call
- * `quicly_can_send_stream_data` to see if stream-level data can be sent.
+ * checks if quicly_send_stream can be invoked
+ * @return a boolean indicating if quicly_send_stream can be called immediately
+ */
+int quicly_can_send_stream_data(quicly_conn_t *conn, quicly_send_context_t *s);
+/**
+ * Sends data of given stream.  Called by stream scheduler.  Only streams that can send some data or EOS should be specified.  It is
+ * the responsibilty of the stream scheduler to maintain a list of such streams.
  */
 int quicly_send_stream(quicly_stream_t *stream, quicly_send_context_t *s);
 /**
@@ -811,7 +835,11 @@ quicly_datagram_t *quicly_send_stateless_reset(quicly_context_t *ctx, struct soc
 /**
  *
  */
-int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_fd);
+int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet);
+/**
+ *
+ */
+int ipoc_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_fd,unsigned int host)
 /**
  *
  */
@@ -845,6 +873,10 @@ int quicly_accept(quicly_conn_t **conn, quicly_context_t *ctx, struct sockaddr *
  *
  */
 ptls_t *quicly_get_tls(quicly_conn_t *conn);
+/**
+ *
+ */
+quicly_stream_id_t quicly_get_ingress_max_streams(quicly_conn_t *conn, int uni);
 /**
  *
  */
@@ -957,10 +989,16 @@ inline int quicly_is_client(quicly_conn_t *conn)
     return (c->host.bidi.next_stream_id & 1) == 0;
 }
 
-inline quicly_stream_id_t quicly_get_next_stream_id(quicly_conn_t *conn, int uni)
+inline quicly_stream_id_t quicly_get_host_next_stream_id(quicly_conn_t *conn, int uni)
 {
     struct _st_quicly_conn_public_t *c = (struct _st_quicly_conn_public_t *)conn;
     return uni ? c->host.uni.next_stream_id : c->host.bidi.next_stream_id;
+}
+
+inline quicly_stream_id_t quicly_get_peer_next_stream_id(quicly_conn_t *conn, int uni)
+{
+    struct _st_quicly_conn_public_t *c = (struct _st_quicly_conn_public_t *)conn;
+    return uni ? c->peer.uni.next_stream_id : c->peer.bidi.next_stream_id;
 }
 
 inline void quicly_get_peername(quicly_conn_t *conn, struct sockaddr **sa, socklen_t *salen)
@@ -1007,12 +1045,6 @@ inline int quicly_stream_has_receive_side(int is_client, quicly_stream_id_t stre
 inline int quicly_stream_is_self_initiated(quicly_stream_t *stream)
 {
     return quicly_stream_is_client_initiated(stream->stream_id) == quicly_is_client(stream->conn);
-}
-
-inline quicly_stats_t *quicly_get_stats(quicly_conn_t *conn)
-{
-    struct _st_quicly_conn_public_t *c = (struct _st_quicly_conn_public_t *)conn;
-    return &c->stats;
 }
 
 inline void quicly_byte_to_hex(char *dst, uint8_t v)

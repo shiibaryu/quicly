@@ -93,7 +93,7 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
     return 0;
 }
 
-static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg, size_t dgram_len)
+static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg, size_t dgram_len,int tun_fd,unsigned int host)
 {
     size_t off, packet_len, i;
 
@@ -108,7 +108,7 @@ static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg
                 break;
         if (conns[i] != NULL) {
             /* let the current connection handle ingress packets */
-            quicly_receive(conns[i], &decoded,tun_fd);
+            ipoc_receive(conns[i], &decoded,tun_fd,host);
         } else if (!is_client) {
             /* assume that the packet is a new connection */
             quicly_accept(conns + i, &ctx, msg->msg_name, msg->msg_namelen, &decoded, ptls_iovec_init(NULL, 0), &next_cid, NULL);
@@ -182,7 +182,7 @@ static int send_one(int fd, quicly_datagram_t *p)
     return ret;
 }
 
-static int run_ipoc(int sock_fd,int tun_fd,quicly_conn_t *client)
+static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *client)
 {
         quicly_conn_t *conns[256] = {client};
         size_t i;
@@ -283,7 +283,7 @@ static int run_ipoc(int sock_fd,int tun_fd,quicly_conn_t *client)
                         while(((rret = recvmsg(sock_fd,&msg,0)) == -1 && errno == EINTR)
                                 ;
                         if(rret > 0){
-                                process_msg(client != NULL,conns,&msg,rret);
+                                process_msg(client != NULL,conns,&msg,rret,tun_fd,host);
                         }
                         
                         for(i=0;conns[i] != NULL;++i){
@@ -323,8 +323,9 @@ int main(int argc,char **argv[])
         char buffer[BUFSIZE];
         unsigned short type;
         unsigned short tun;
-        char *host = "127.0.0.1";
-        char *port = "4433";
+        /*char *host = "127.0.0.1";*/
+        unsigned int host;
+        char *port = "3000";
         struct sockaddr sa;
         socklen_t salen;
         
@@ -341,7 +342,7 @@ int main(int argc,char **argv[])
         quicly_amend_ptls_context(ctx.tls);
         ctx.stream_open = &stream_open;
 
-        while((option = getopt(argc,argv,"c:k:i:p:h")) != 0){
+        while((option = getopt(argc,argv,"c:k:i:p:h:d")) != 0){
                 switch(option){
                         case 'c': /* load certificate chain */ {
                                 int ret;
@@ -372,6 +373,9 @@ int main(int argc,char **argv[])
                         case 'p':
                                 port = optarg;
                                 break;
+                        case 'd':
+                                host = atoi(optarg);
+                                break;
                         case 'h':
                                 usage();
                                 break;
@@ -390,7 +394,7 @@ int main(int argc,char **argv[])
                 host = *argv++;
         }
 
-        if(address_resolver(&sa,&salen,host,port,AF_INET,SOCK_DGRAM,0) != 0){
+        if(address_resolver(&sa,&salen,(char *)host,port,AF_INET,SOCK_DGRAM,0) != 0){
                 exit(1);
         }
 
@@ -431,6 +435,6 @@ int main(int argc,char **argv[])
                 quicly_open_stream(client,&stream,0);
         }
         
-        return run_ipoc(sock_fd,tun_fd,client);
+        return run_ipoc(sock_fd,tun_fd,host,client);
 }
 
