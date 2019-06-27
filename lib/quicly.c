@@ -22,6 +22,8 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <net/ethernet.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
