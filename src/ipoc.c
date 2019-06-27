@@ -341,7 +341,7 @@ int main(int argc,char **argv[])
         quicly_amend_ptls_context(ctx.tls);
         ctx.stream_open = &stream_open;
 
-        while((option = getopt(argc,argv,"c:k:i:p:s:hd:v")) != 0){
+        while((option = getopt(argc,argv,"c:k:i:p:h")) != 0){
                 switch(option){
                         case 'c': /* load certificate chain */ {
                                 int ret;

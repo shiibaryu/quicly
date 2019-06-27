@@ -4098,7 +4098,6 @@ int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_
     }
 
     /* decrypt */
-    /**********************ここもありかも***********************/
     if ((payload = decrypt_packet(header_protection, aead, &(*space)->next_expected_packet_number, packet, &pn)).base == NULL) {
         ret = QUICLY_ERROR_PACKET_IGNORED;
         goto Exit;
@@ -4118,9 +4117,6 @@ int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_
     conn->super.stats.num_packets.received += 1;
     conn->super.stats.num_bytes.received += packet->octets.len;
 
-　  /**********************ここもありかも***********************/
-
-
     /* state updates, that are triggered by the receipt of a packet */
     if (epoch == QUICLY_EPOCH_HANDSHAKE && conn->initial != NULL) {
         /* Discard Initial space before processing the payload of the Handshake packet to avoid the chance of an ACK frame included
@@ -4132,7 +4128,6 @@ int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_
     }
 
     /* handle the payload */
-    /**********************ちょっと怪しい***********************/
     if ((ret = handle_payload(conn, epoch, payload.base, payload.len, &offending_frame_type, &is_ack_only)) != 0)
         goto Exit;
     if (*space != NULL) {
@@ -4176,13 +4171,13 @@ int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_
             conn->egress.send_ack_at = 0;
         break;
     default:
-        int bytes_written;
-        //payload_lenでダメだったら、packet->
-        byte_written = write(tun_fd,&payload.base,payload.len):
-        if (bytes_written == -1) {
-            perror("Unable to write to tunnel\n");
-            exit(EXIT_FAILURE);
+        int tun_write;
+        tun_write = write(tun_fd,&payload.base,payload.len);
+        if(tun_write < 0){
+            perror("write");
+            exit -1;
         }
+
         break;
     }
 
