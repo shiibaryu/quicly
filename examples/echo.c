@@ -12,9 +12,9 @@
 #include <getopt.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <errno.h>
 #include <linux/if_tun.h>
 #include <openssl/pem.h>
-#include "tun.h"
 #include "picotls.h"
 #include "picotls/openssl.h"
 #include "quicly.h"
@@ -123,7 +123,7 @@ static int address_resolver(struct sockaddr *sa,socklen_t *salen,const char *hos
 
         hints.ai_socktype = type;
         hints.ai_family   = family;
-        hints.ai_protocol = protocol;
+        hints.ai_protocol = proto;
         hints.ai_flags    = AI_ADDRCONFIG | AI_NUMERICSERV | AI_PASSIVE;
         if((ret = getaddrinfo(host,port,&hints,&res)) != 0 || res == NULL){
                 fprintf(stderr,"failed to resolve address %s:%s:%s\n",host,port,
@@ -132,7 +132,7 @@ static int address_resolver(struct sockaddr *sa,socklen_t *salen,const char *hos
         }
 
         memcpy(sa,res->ai_addr,res->ai_addrlen);
-        *sa_len = res->ai_addrlen;
+        *salen = res->ai_addrlen;
 
         freeaddrinfo(res);
 
@@ -190,26 +190,22 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
         int read_stdin = client != NULL;
 
         while(1){
-                fd_set readfds;
-                struct timeval tv;
-                do{
-                        int64_t first_timeout = INT64_MAX;
-                        now = ctx.now->cb(ctx.now);
-                        for(i=0;conns[i] != NULL;i++){
+                        fd_set readfds;
+                        struct timeval tv;
+                do {
+                        int64_t first_timeout = INT64_MAX, now = ctx.now->cb(ctx.now);
+                        for (i = 0; conns[i] != NULL; ++i) {
                                 int64_t conn_timeout = quicly_get_first_timeout(conns[i]);
-                                if(conn_timeout < first_timeout){
+                                if (conn_timeout < first_timeout)
                                         first_timeout = conn_timeout;
-                                }
                         }
-                        if(now < first_timeout){
+                        if (now < first_timeout) {
                                 int64_t delta = first_timeout - now;
-                                if(delta > 1000 * 1000){
+                                if (delta > 1000 * 1000)
                                         delta = 1000 * 1000;
-                                }
                                 tv.tv_sec = delta / 1000;
                                 tv.tv_usec = (delta % 1000) * 1000;
-                        }
-                        else{
+                        } else {
                                 tv.tv_sec = 1000;
                                 tv.tv_usec = 0;
                         }
@@ -218,7 +214,6 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         FD_ZERO(&readfds);
                         FD_SET(sock_fd,&readfds);
                         FD_SET(tun_fd, &readfds);
-
                 }while(select(max_fd + 1,&readfds,NULL,NULL,&tv) == -1 && errno == EINTR);
                 
                 /*read data from tun_fd and pack it in quic packet*/
@@ -237,7 +232,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         int x;
                         ssize_t rret;
 
-                        while(((rret = recvmsg(tun_fd,&msg,0)) == -1 && errno == EINTR)
+                        while(((rret = recvmsg(tun_fd,&mess,0)) == -1 && errno == EINTR))
                                 ;
                         if(rret > 0){
                                 for(i=0;conns[i] != NULL;++i){
@@ -266,7 +261,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                                 }
                         }
                 }
-                if(FD_ISSET(sock_fd,&readfds){
+                if(FD_ISSET(sock_fd,&readfds)){
                         uint8_t buf[1500];
                         struct msghdr mess;
                         struct sockaddr sa;
@@ -312,36 +307,36 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
 
         return 0;
 }
-int main(int argc,char **argv[])
+int main(int argc,char **argv)
 {
         int sock_fd,tun_fd;
         int ret;
-        int port;
         int maxfd;
         int option;
         char ifname[IFNAMSIZ] = "";
-        char buffer[BUFSIZE];
-        unsigned short type;
-        unsigned short tun;
-        /*char *host = "127.0.0.1";*/
-        unsigned int host;
+        char buffer[BUFSIZ];
+        char *host = "127.0.0.1";
+        /*unsigned int host;*/
         char *port = "3000";
         struct sockaddr sa;
         socklen_t salen;
         
         ptls_openssl_sign_certificate_t sign_certificate;
         ptls_context_t tlsctx = {
-                .random_bytes   = ptls_open_ssl_random_bytes,
+                .random_bytes   = ptls_openssl_random_bytes,
                 .get_time       = &ptls_get_time,
-                .key_exchange   = ptls_openssl_key_exchanges,
+                .key_exchanges   = ptls_openssl_key_exchanges,
                 .cipher_suites  = ptls_openssl_cipher_suites,
         };
-        
-        ctx = quicly_default_context;
+
+        quicly_stream_open_t stream_open = {on_stream_open};
+
+        /* setup quic context */
+        ctx = quicly_spec_context;
         ctx.tls = &tlsctx;
         quicly_amend_ptls_context(ctx.tls);
         ctx.stream_open = &stream_open;
-
+        
         while((option = getopt(argc,argv,"c:k:i:p:h:d")) != 0){
                 switch(option){
                         case 'c': /* load certificate chain */ {
@@ -377,7 +372,7 @@ int main(int argc,char **argv[])
                                 host = atoi(optarg);
                                 break;
                         case 'h':
-                                usage();
+                                usage(argv[0]);
                                 break;
                 }
         }
@@ -398,7 +393,7 @@ int main(int argc,char **argv[])
                 exit(1);
         }
 
-        sock_fd = socket(sa.ss_family,SOCK_DGRAM,0);
+        sock_fd = socket(sa.sa_family,SOCK_DGRAM,0);
         if(sock_fd < 0){
                 perror("failed to make a socket");
         }
@@ -426,7 +421,7 @@ int main(int argc,char **argv[])
                 }
                 quicly_conn_t *client = NULL;
                 ret = 0;
-                if((ret = quicly_connect(&client,ctx,host,(struct sockaddr *)sa,salen,
+                if((ret = quicly_connect(&client,&ctx,host,(struct sockaddr *)&sa,salen,
                         &next_cid,NULL,NULL)) != 0){
                         fprintf(stderr,"quicly_connect failed:%d\n",ret);
                         exit(1);
@@ -435,6 +430,5 @@ int main(int argc,char **argv[])
                 quicly_open_stream(client,&stream,0);
         }
         
-        return run_ipoc(sock_fd,tun_fd,host,client);
+        return run_ipoc(sock_fd,tun_fd,(unsigned int)host,client);
 }
-
