@@ -199,7 +199,6 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
         quicly_conn_t *conns[256] = {client};
         size_t i;
         int max_fd;
-        int read_stdin = client != NULL;
 
         while(1){
                         fd_set readfds;
@@ -242,7 +241,6 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         vec.iov_len = sizeof(buf);
                         mess.msg_iov = &vec;
                         mess.msg_iovlen = 1;
-                        int x;
                         ssize_t rret;
 
                         while(((rret = recvmsg(tun_fd,&mess,0)) == -1 && errno == EINTR))
@@ -250,15 +248,17 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         if(rret > 0){
                                 for(i=0;conns[i] != NULL;++i){
                                         quicly_datagram_t *dgrams[i];
-                                        dgrams.data.base = buf;
-                                        dgrams.data.len = sizeof(buf);
+                                        dgrams->data.base = buf;
+                                        dgrams->data.len = sizeof(buf);
                                         size_t num_dgrams = 1;
-                                        int ret =  quicly_send(conns[i],dgrams[i],&num_dgrams);
+                                        int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
                                         switch(ret){
                                         case 0:{
-                                                send_one(sock_fd,dgrams);
-                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[i]);
-                                                
+                                                size_t j;
+                                                for (j = 0; j != num_dgrams; ++j) {
+                                                        send_one(fd, dgrams[j]);
+                                                        ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
+                                                }
                                         }break;
                                         case QUICLY_ERROR_FREE_CONNECTION:
                                                 quicly_free(conns[i]);
@@ -297,12 +297,15 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         for(i=0;conns[i] != NULL;++i){
                                 quicly_datagram_t *dgrams[i];
                                 size_t num_dgrams = 1;
-                                int ret = quicly_send(conns[i],dgrams[i],&num_dgrams);
+                                int ret = quicly_send(conns[i],dgrams,&num_dgrams);
                                 switch(ret){
                                 case 0:{
-                                                send_one(sock_fd,dgrams[i]);
-                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[i]);
-                                        }break;
+                                        size_t j;
+                                        for (j = 0; j != num_dgrams; ++j) {
+                                                send_one(fd, dgrams[j]);
+                                                ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
+                                        }
+                                }break;
                                 case QUICLY_ERROR_FREE_CONNECTION:
                                        quicly_free(conns[i]);
                                        memmove(conns + i,conns+i+1,sizeof(conns)-sizeof(conns[0])*(i+1));
@@ -323,11 +326,8 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
 int main(int argc,char **argv)
 {
         int sock_fd,tun_fd;
-        int ret;
-        int maxfd;
         int option;
         char ifname[IFNAMSIZ] = "";
-        char buffer[BUFSIZ];
         char *host = "127.0.0.1";
         /*unsigned int host;*/
         char *port = "3000";
@@ -382,7 +382,7 @@ int main(int argc,char **argv)
                                 port = optarg;
                                 break;
                         case 'd':
-                                host = atoi(optarg);
+                                host = optarg;
                                 break;
                         case 'h':
                                 usage(argv[0]);
@@ -413,7 +413,7 @@ int main(int argc,char **argv)
 
         tun_fd = tun_alloc(ifname);
         if(tun_fd < 0){
-               my_err("failed to connect tun/tap interface");
+               printf("failed to connect tun/tap interface");
                exit(1);
         }
         
