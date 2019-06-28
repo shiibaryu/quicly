@@ -117,28 +117,26 @@ static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg
     }
 }
 
-static int address_resolver(struct sockaddr *sa,socklen_t *salen,const char *host,const char *port,int family,int type,int proto)
+
+static int resolve_address(struct sockaddr *sa, socklen_t *salen, const char *host, const char *port, int family, int type,
+                           int proto)
 {
-        struct addrinfo hints,*res;
-        int ret;
+    struct addrinfo hints, *res;
+    int err;
 
-        hints.ai_socktype = type;
-        hints.ai_family   = family;
-        hints.ai_protocol = proto;
-        hints.ai_flags    = AI_ADDRCONFIG | AI_NUMERICSERV | AI_PASSIVE;
-        if((ret = getaddrinfo(host,port,&hints,&res)) != 0 || res == NULL){
-                fprintf(stderr,"failed to resolve address %s:%s:%s\n",host,port,
-                ret != 0 ? gai_strerror(err):"getaddrinfo returned NULL");
-                return -1;
-        }
-
-        memcpy(sa,res->ai_addr,res->ai_addrlen);
-        *salen = res->ai_addrlen;
-
-        freeaddrinfo(res);
-
-        return 0;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = family;
+    hints.ai_socktype = type;
+    hints.ai_protocol = proto;
+    hints.ai_flags = AI_ADDRCONFIG | AI_NUMERICSERV | AI_PASSIVE;
+    if ((err = getaddrinfo(host, port, &hints, &res)) != 0 || res == NULL) {
+        fprintf(stderr, "failed to resolve address:%s:%s:%s\n", host, port,
+                err != 0 ? gai_strerror(err) : "getaddrinfo returned NULL");
+        return -1;
+    }
 }
+
+   
 
 int tun_alloc(char *dev)
 {
@@ -252,8 +250,8 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         if(rret > 0){
                                 for(i=0;conns[i] != NULL;++i){
                                         quicly_datagram_t *dgrams[i];
-                                        dgrams->data.base = buf;
-                                        dgrams->data.len = sizeof(buf);
+                                        dgrams.data.base = buf;
+                                        dgrams.data.len = sizeof(buf);
                                         size_t num_dgrams = 1;
                                         int ret =  quicly_send(conns[i],dgrams[i],&num_dgrams);
                                         switch(ret){
@@ -303,7 +301,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                                 switch(ret){
                                 case 0:{
                                                 send_one(sock_fd,dgrams[i]);
-                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[i]]);
+                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[i]);
                                         }break;
                                 case QUICLY_ERROR_FREE_CONNECTION:
                                        quicly_free(conns[i]);
@@ -404,9 +402,9 @@ int main(int argc,char **argv)
                 host = *argv++;
         }
 
-        if(address_resolver(&sa,&salen,(char *)host,port,AF_INET,SOCK_DGRAM,0) != 0){
+        if (resolve_address((struct sockaddr *)&sa, &salen, host, port, AF_INET, SOCK_DGRAM, 0) != 0)
                 exit(1);
-        }
+
 
         sock_fd = socket(sa.sa_family,SOCK_DGRAM,0);
         if(sock_fd < 0){
@@ -419,7 +417,6 @@ int main(int argc,char **argv)
                exit(1);
         }
         
-        quicly_conn_t *client = NULL;
         if(is_server()){
                 int reuseaddr = 1;
                 setsocketopt(sock_fd,SOL_SOCKET,SO_REUSEADDR,&reuseaddr,sizeof(reuseaddr));
@@ -427,24 +424,24 @@ int main(int argc,char **argv)
                         perror("failed to bind\n");
                         exit(1);
                 }
-        }
-        else{
+        }else{
                 struct sockaddr_in local;
                 memset(&local,0,sizeof(local));
                 if(bind(sock_fd,(struct sockaddr *)&local,sizeof(local)) != 0){
                         perror("failed to bind");
                         exit(1);
                 }
-                quicly_conn_t *client = NULL;
-                ret = 0;
-                if((ret = quicly_connect(&client,&ctx,host,(struct sockaddr *)&sa,salen,
-                        &next_cid,NULL,NULL)) != 0){
-                        fprintf(stderr,"quicly_connect failed:%d\n",ret);
+        }
+        quicly_conn_t *client = NULL;
+        if (!is_server()) {
+                /* initiate a connection, and open a stream */
+                int ret;
+                if ((ret = quicly_connect(&client, &ctx, host, (struct sockaddr *)&sa, salen, &next_cid, NULL, NULL)) != 0) {
+                        fprintf(stderr, "quicly_connect failed:%d\n", ret);
                         exit(1);
                 }
-                quicly_stream_t *stream;
-                quicly_open_stream(client,&stream,0);
+                quicly_stream_t *stream; /* we retain the opened stream via the on_stream_open callback */
+                quicly_open_stream(client, &stream, 0);
         }
-        
         return run_ipoc(sock_fd,tun_fd,(unsigned int)host,client);
 }
