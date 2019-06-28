@@ -1,19 +1,17 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <net/if.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <getopt.h>
-#include <fcntl.h>
-#include <netdb.h>
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700 /* required for glibc to use getaddrinfo, etc. */
+#endif
+#include <assert.h>
 #include <errno.h>
-#include <linux/if_tun.h>
+#include <fcntl.h>
+#include <getopt.h>
+#include <netdb.h>
+#include <stdio.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <openssl/pem.h>
 #include "picotls.h"
 #include "picotls/openssl.h"
@@ -182,6 +180,20 @@ static int send_one(int fd, quicly_datagram_t *p)
     return ret;
 }
 
+static int on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream)
+{
+    static const quicly_stream_callbacks_t stream_callbacks = {
+        quicly_streambuf_destroy, quicly_streambuf_egress_shift, quicly_streambuf_egress_emit, on_stop_sending, on_receive,
+        on_receive_reset};
+    int ret;
+
+    if ((ret = quicly_streambuf_create(stream, sizeof(quicly_streambuf_t))) != 0)
+        return ret;
+    stream->callbacks = &stream_callbacks;
+    return 0;
+}
+
+
 static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *client)
 {
         quicly_conn_t *conns[256] = {client};
@@ -237,8 +249,8 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         if(rret > 0){
                                 for(i=0;conns[i] != NULL;++i){
                                         quicly_datagram_t *dgrams;
-                                        dgrams->data->base = buf;
-                                        dgrams->data->len = sizeof(buf);
+                                        dgrams->data.base = buf;
+                                        dgrams->data.len = sizeof(buf);
                                         size_t num_dgrams = 1;
                                         int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
                                         switch(ret){
@@ -275,10 +287,10 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         mess.msg_iovlen = 1;
                         ssize_t rret;
 
-                        while(((rret = recvmsg(sock_fd,&msg,0)) == -1 && errno == EINTR)
+                        while(((rret = recvmsg(sock_fd,&msg,0)) == -1 && errno == EINTR))
                                 ;
                         if(rret > 0){
-                                process_msg(client != NULL,conns,&msg,rret,tun_fd,host);
+                                process_msg(client != NULL,conns,&mess,rret,tun_fd,host);
                         }
                         
                         for(i=0;conns[i] != NULL;++i){
@@ -412,6 +424,7 @@ int main(int argc,char **argv)
                         exit(1);
                 }
         }
+        quicly_conn_t *client = NULL;
         else{
                 struct sockaddr_in local;
                 memset(&local,0,sizeof(local));
