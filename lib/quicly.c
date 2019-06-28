@@ -22,11 +22,14 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <net/ethernet.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include "khash.h"
