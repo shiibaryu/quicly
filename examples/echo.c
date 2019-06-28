@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <linux/if_tun.h>  
 #include <openssl/pem.h>
 #include "picotls.h"
 #include "picotls/openssl.h"
@@ -142,7 +143,6 @@ static int address_resolver(struct sockaddr *sa,socklen_t *salen,const char *hos
 int tun_alloc(char *dev)
 {
         struct ifreq ifr;
-        int flags = IFF_TUN;
         int fd,ret;
         char *i_dev = "/dev/net/tun";
         
@@ -153,7 +153,7 @@ int tun_alloc(char *dev)
         
         memset(&ifr,0,sizeof(ifr));
         
-        ifr.ifr_flags = flags;
+        ifr.ifr_flags = IFF_TUN;
         
         if(*dev){
                 strncpy(ifr.ifr_name,dev,IFNAMSIZ);
@@ -223,6 +223,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                                 tv.tv_sec = 1000;
                                 tv.tv_usec = 0;
                         }
+
                         max_fd = sock_fd >= tun_fd ? sock_fd : tun_fd;
 
                         FD_ZERO(&readfds);
@@ -250,15 +251,15 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                                 ;
                         if(rret > 0){
                                 for(i=0;conns[i] != NULL;++i){
-                                        quicly_datagram_t *dgrams;
+                                        quicly_datagram_t *dgrams[i];
                                         dgrams->data.base = buf;
                                         dgrams->data.len = sizeof(buf);
                                         size_t num_dgrams = 1;
-                                        int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
+                                        int ret =  quicly_send(conns[i],dgrams[i],&num_dgrams);
                                         switch(ret){
                                         case 0:{
                                                 send_one(sock_fd,dgrams);
-                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams);
+                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[i]);
                                                 
                                         }break;
                                         case QUICLY_ERROR_FREE_CONNECTION:
@@ -296,13 +297,13 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         }
                         
                         for(i=0;conns[i] != NULL;++i){
-                                quicly_datagram_t *dgrams;
+                                quicly_datagram_t *dgrams[i];
                                 size_t num_dgrams = 1;
-                                int ret = quicly_send(conns[i],dgrams,&num_dgrams);
+                                int ret = quicly_send(conns[i],dgrams[i],&num_dgrams);
                                 switch(ret){
                                 case 0:{
                                                 send_one(sock_fd,dgrams[i]);
-                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[j]);
+                                                ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[i]]);
                                         }break;
                                 case QUICLY_ERROR_FREE_CONNECTION:
                                        quicly_free(conns[i]);
