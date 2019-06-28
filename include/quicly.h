@@ -808,7 +808,7 @@ int quicly_is_flow_capped(quicly_conn_t *conn);
  * checks if quicly_send_stream can be invoked
  * @return a boolean indicating if quicly_send_stream can be called immediately
  */
-int quicly_can_send_stream_data(quicly_conn_t *conn, quicly_send_context_t *s);
+int quicly_can_send_stream_data(quicly_conn_t *conn, quicly_send_context_t *s, int new_data);
 /**
  * Sends data of given stream.  Called by stream scheduler.  Only streams that can send some data or EOS should be specified.  It is
  * the responsibilty of the stream scheduler to maintain a list of such streams.

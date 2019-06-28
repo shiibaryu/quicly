@@ -1154,7 +1154,7 @@ void quicly_free(quicly_conn_t *conn)
 {
     LOG_CONNECTION_EVENT(conn, QUICLY_EVENT_TYPE_FREE);
 
-    destroy_all_streams(conn, 0);
+    destroy_all_streams(conn, 0, 1);
 
     quicly_maxsender_dispose(&conn->ingress.max_data.sender);
     if (conn->ingress.max_streams.uni != NULL)

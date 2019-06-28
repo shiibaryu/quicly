@@ -32,13 +32,27 @@ extern "C" {
 #include "quicly/constants.h"
 
 typedef struct st_quicly_maxsender_t {
-    int64_t max_sent;
+    /**
+     * maximum value being announced (never decreases)
+     */
+    int64_t max_committed;
+    /**
+     * maximum value being acked by peer
+     */
     int64_t max_acked;
+    /**
+     * number of maximums inflight
+     */
     size_t num_inflight;
+    /**
+     *
+     */
+    unsigned force_send : 1;
 } quicly_maxsender_t;
 
 typedef struct st_quicly_maxsender_sent_t {
-    int64_t value;
+    uint64_t inflight : 1;
+    uint64_t value : 63;
 } quicly_maxsender_sent_t;
 
 static void quicly_maxsender_init(quicly_maxsender_t *m, int64_t initial_value);
