@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -89,6 +90,18 @@ static const quicly_stream_callbacks_t server_stream_callbacks = {quicly_streamb
                                                                   client_on_receive,
                                                                   on_receive_reset};
 
+static void dump_stats(FILE *fp, quicly_conn_t *conn)
+{
+    quicly_stats_t stats;
+
+    quicly_get_stats(conn, &stats);
+    fprintf(fp,
+            "packets-received: %" PRIu64 ", packets-sent: %" PRIu64 ", packets-lost: %" PRIu64 ", ack-received: %" PRIu64
+            ", bytes-received: %" PRIu64 ", bytes-sent: %" PRIu64 ", srtt: %" PRIu32 "\n",
+            stats.num_packets.received, stats.num_packets.sent, stats.num_packets.lost, stats.num_packets.ack_received,
+            stats.num_bytes.received, stats.num_bytes.sent, stats.rtt.smoothed);
+}
+
 static int parse_request(ptls_iovec_t input, ptls_iovec_t *path, int *is_http1)
 {
     size_t off = 0, path_start;
@@ -136,20 +149,73 @@ static void send_header(quicly_stream_t *stream, int is_http1, int status, const
     send_str(stream, buf);
 }
 
+static int flatten_file_vec(quicly_sendbuf_vec_t *vec, void *dst, size_t off, size_t len)
+{
+    int fd = (int)vec->cbdata;
+    ssize_t rret;
+
+    /* FIXME handle partial read */
+    while ((rret = pread(fd, dst, len, off)) == -1 && errno == EINTR)
+        ;
+
+    return rret == len ? 0 : QUICLY_TRANSPORT_ERROR_INTERNAL; /* should return application-level error */
+}
+
+static void discard_file_vec(quicly_sendbuf_vec_t *vec)
+{
+    int fd = (int)vec->cbdata;
+    close(fd);
+}
+
 static int send_file(quicly_stream_t *stream, int is_http1, const char *fn, const char *mime_type)
 {
-    FILE *fp;
-    char buf[1024];
-    size_t n;
+    static const quicly_streambuf_sendvec_callbacks_t send_file_callbacks = {flatten_file_vec, discard_file_vec};
+    int fd;
+    struct stat st;
 
-    if ((fp = fopen(fn, "rb")) == NULL)
+    if ((fd = open(fn, O_RDONLY)) == -1)
         return 0;
-    send_header(stream, is_http1, 200, mime_type);
-    while ((n = fread(buf, 1, sizeof(buf), fp)) != 0)
-        quicly_streambuf_egress_write(stream, buf, n);
-    fclose(fp);
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return 0;
+    }
 
+    send_header(stream, is_http1, 200, mime_type);
+    quicly_sendbuf_vec_t vec = {&send_file_callbacks, (size_t)st.st_size, (void *)(intptr_t)fd};
+    quicly_streambuf_egress_write_vec(stream, &vec);
     return 1;
+}
+
+/**
+ * This function is an implementation of the quicly_sendbuf_flatten_vec_cb callback.  Refer to the doc-comments of the callback type
+ * for the API.
+ */
+static int flatten_sized_text(quicly_sendbuf_vec_t *vec, void *dst, size_t off, size_t len)
+{
+    static const char pattern[] =
+        "hello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello world\nhello "
+        "world\nhello world\nhello world\nhello world\nhello world\nhello world\n";
+
+    const char *src = pattern + off % 12;
+    assert(src + len - pattern <= sizeof(pattern) - 1); /* pattern is bigger than MTU size */
+    memcpy(dst, src, len);
+    return 0;
+
+#undef PATTERN
 }
 
 static int send_sized_text(quicly_stream_t *stream, ptls_iovec_t path, int is_http1)
@@ -167,10 +233,9 @@ static int send_sized_text(quicly_stream_t *stream, ptls_iovec_t path, int is_ht
     }
 
     send_header(stream, is_http1, 200, "text/plain; charset=utf-8");
-    for (; size >= 12; size -= 12)
-        quicly_streambuf_egress_write(stream, "hello world\n", 12);
-    if (size != 0)
-        quicly_streambuf_egress_write(stream, "hello world", size);
+    static const quicly_streambuf_sendvec_callbacks_t callbacks = {flatten_sized_text};
+    quicly_sendbuf_vec_t vec = {&callbacks, size, NULL};
+    quicly_streambuf_egress_write_vec(stream, &vec);
     return 1;
 }
 
@@ -247,12 +312,7 @@ static int client_on_receive(quicly_stream_t *stream, size_t off, const void *sr
             if (request_interval != 0) {
                 enqueue_requests_at = ctx.now->cb(ctx.now) + request_interval;
             } else {
-                quicly_stats_t *stats = quicly_get_stats(stream->conn);
-                fprintf(stderr,
-                        "packets: received: %" PRIu64 ", sent: %" PRIu64 ", lost: %" PRIu64 ", ack-received: %" PRIu64
-                        ", bytes-received: %" PRIu64 ", bytes-sent: %" PRIu64 "\n",
-                        stats->num_packets.received, stats->num_packets.sent, stats->num_packets.lost,
-                        stats->num_packets.ack_received, stats->num_bytes.received, stats->num_bytes.sent);
+                dump_stats(stderr, stream->conn);
                 quicly_close(stream->conn, 0, "");
             }
         }
@@ -475,12 +535,8 @@ static void on_signal(int signo)
     size_t i;
     for (i = 0; i != num_conns; ++i) {
         const quicly_cid_plaintext_t *master_id = quicly_get_master_id(conns[i]);
-        quicly_stats_t *stats = quicly_get_stats(conns[i]);
-        fprintf(stderr,
-                "conn:%08" PRIu32 ": received: %" PRIu64 ", sent: %" PRIu64 ", lost: %" PRIu64 ", ack-received: %" PRIu64
-                ", bytes-received: %" PRIu64 ", bytes-sent: %" PRIu64 "\n",
-                master_id->master_id, stats->num_packets.received, stats->num_packets.sent, stats->num_packets.lost,
-                stats->num_packets.ack_received, stats->num_bytes.received, stats->num_bytes.sent);
+        fprintf(stderr, "conn:%08" PRIu32 ": ", master_id->master_id);
+        dump_stats(stderr, conns[i]);
     }
     if (signo == SIGINT)
         _exit(0);
@@ -574,7 +630,7 @@ static int run_server(struct sockaddr *sa, socklen_t salen)
                         conn = conns[i];
                         break;
                     }
-                }s
+                }
                 if (conn != NULL) {
                     /* existing connection */
                     quicly_receive(conn, &packet);
@@ -714,29 +770,30 @@ static void usage(const char *cmd)
     printf("Usage: %s [options] host port\n"
            "\n"
            "Options:\n"
-           "  -a <alpn list>       a coma separated list of ALPN identifiers\n"
-           "  -C <cid-key>         CID encryption key (server-only). Randomly generated\n"
-           "                       if omitted.\n"
+           "  -a <alpn list>            a coma separated list of ALPN identifiers\n"
+           "  -C <cid-key>              CID encryption key (server-only). Randomly generated\n"
+           "                            if omitted.\n"
            "  -c certificate-file\n"
-           "  -k key-file          specifies the credentials to be used for running the\n"
-           "                       server. If omitted, the command runs as a client.\n"
-           "  -e event-log-file    file to log events\n"
-           "  -i interval          interval to reissue requests (in milliseconds)\n"
-           "  -I timeout           idle timeout (in milliseconds; default: 600,000)\n"
-           "  -l log-file          file to log traffic secrets\n"
-           "  -M <bytes>           max stream data (in bytes; default: 1MB)\n"
-           "  -m <bytes>           max data (in bytes; default: 16MB)\n"
-           "  -N                   enforce HelloRetryRequest (client-only)\n"
-           "  -n                   enforce version negotiation (client-only)\n"
-           "  -p path              path to request (can be set multiple times)\n"
-           "  -R                   require Retry (server only)\n"
-           "  -r [initial-rto]     initial RTO (in milliseconds)\n"
-           "  -s session-file      file to load / store the session ticket\n"
-           "  -V                   verify peer using the default certificates\n"
-           "  -v                   verbose mode (-vv emits packet dumps as well)\n"
-           "  -x named-group       named group to be used (default: secp256r1)\n"
-           "  -X                   max bidirectional stream count (default: 100)\n"
-           "  -h                   print this help\n"
+           "  -k key-file               specifies the credentials to be used for running the\n"
+           "                            server. If omitted, the command runs as a client.\n"
+           "  -e event-log-file         file to log events\n"
+           "  -i interval               interval to reissue requests (in milliseconds)\n"
+           "  -I timeout                idle timeout (in milliseconds; default: 600,000)\n"
+           "  -l log-file               file to log traffic secrets\n"
+           "  -M <bytes>                max stream data (in bytes; default: 1MB)\n"
+           "  -m <bytes>                max data (in bytes; default: 16MB)\n"
+           "  -N                        enforce HelloRetryRequest (client-only)\n"
+           "  -n                        enforce version negotiation (client-only)\n"
+           "  -p path                   path to request (can be set multiple times)\n"
+           "  -R                        require Retry (server only)\n"
+           "  -r [initial-pto]          initial PTO (in milliseconds)\n"
+           "  -S [num-speculative-ptos] number of speculative PTOs\n"
+           "  -s session-file           file to load / store the session ticket\n"
+           "  -V                        verify peer using the default certificates\n"
+           "  -v                        verbose mode (-vv emits packet dumps as well)\n"
+           "  -x named-group            named group to be used (default: secp256r1)\n"
+           "  -X                        max bidirectional stream count (default: 100)\n"
+           "  -h                        print this help\n"
            "\n",
            cmd);
 }
@@ -748,7 +805,7 @@ int main(int argc, char **argv)
     socklen_t salen;
     int ch;
 
-    ctx = quicly_default_context;
+    ctx = quicly_spec_context;
     ctx.tls = &tlsctx;
     ctx.stream_open = &stream_open;
     ctx.closed_by_peer = &closed_by_peer;
@@ -756,7 +813,7 @@ int main(int argc, char **argv)
     setup_session_cache(ctx.tls);
     quicly_amend_ptls_context(ctx.tls);
 
-    while ((ch = getopt(argc, argv, "a:C:c:k:e:i:I:l:M:m:Nnp:Rr:s:Vvx:X:h")) != -1) {
+    while ((ch = getopt(argc, argv, "a:C:c:k:e:i:I:l:M:m:Nnp:Rr:S:s:Vvx:X:h")) != -1) {
         switch (ch) {
         case 'a':
             set_alpn(&hs_properties, optarg);
@@ -781,13 +838,13 @@ int main(int argc, char **argv)
             ctx.event_log.cb = quicly_new_default_event_logger(fp);
         } break;
         case 'i':
-            if (sscanf(optarg, "%" PRId64, &request_interval) != 1) {
+            if (sscanf(optarg, "%" SCNd64, &request_interval) != 1) {
                 fprintf(stderr, "failed to parse request interval: %s\n", optarg);
                 exit(1);
             }
             break;
         case 'I':
-            if (sscanf(optarg, "%" PRId64, &ctx.transport_params.idle_timeout) != 1) {
+            if (sscanf(optarg, "%" SCNd64, &ctx.transport_params.idle_timeout) != 1) {
                 fprintf(stderr, "failed to parse idle timeout: %s\n", optarg);
                 exit(1);
             }
@@ -796,7 +853,7 @@ int main(int argc, char **argv)
             break;
         case 'M': {
             uint64_t v;
-            if (sscanf(optarg, "%" PRIu64, &v) != 1) {
+            if (sscanf(optarg, "%" SCNu64, &v) != 1) {
                 fprintf(stderr, "failed to parse max stream data:%s\n", optarg);
                 exit(1);
             }
@@ -805,7 +862,7 @@ int main(int argc, char **argv)
             ctx.transport_params.max_stream_data.uni = v;
         } break;
         case 'm':
-            if (sscanf(optarg, "%" PRIu64, &ctx.transport_params.max_data) != 1) {
+            if (sscanf(optarg, "%" SCNu64, &ctx.transport_params.max_data) != 1) {
                 fprintf(stderr, "failed to parse max data:%s\n", optarg);
                 exit(1);
             }
@@ -826,8 +883,14 @@ int main(int argc, char **argv)
             enforce_retry = 1;
             break;
         case 'r':
-            if (sscanf(optarg, "%" PRIu32, &ctx.loss->default_initial_rtt) != 1) {
+            if (sscanf(optarg, "%" SCNu32, &ctx.loss.default_initial_rtt) != 1) {
                 fprintf(stderr, "invalid argument passed to `-r`\n");
+                exit(1);
+            }
+            break;
+        case 'S':
+            if (sscanf(optarg, "%" SCNu8, &ctx.loss.num_speculative_ptos) != 1) {
+                fprintf(stderr, "invalid argument passed to `-S`\n");
                 exit(1);
             }
             break;
@@ -864,7 +927,7 @@ int main(int argc, char **argv)
             }
         } break;
         case 'X':
-            if (sscanf(optarg, "%" PRIu64, &ctx.transport_params.max_streams_bidi) != 1) {
+            if (sscanf(optarg, "%" SCNu64, &ctx.transport_params.max_streams_bidi) != 1) {
                 fprintf(stderr, "failed to parse max streams count: %s\n", optarg);
                 exit(1);
             }
