@@ -12,6 +12,8 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 #include <openssl/pem.h>
 #include "picotls.h"
 #include "picotls/openssl.h"
@@ -287,7 +289,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         mess.msg_iovlen = 1;
                         ssize_t rret;
 
-                        while(((rret = recvmsg(sock_fd,&msg,0)) == -1 && errno == EINTR))
+                        while(((rret = recvmsg(sock_fd,&mess,0)) == -1 && errno == EINTR))
                                 ;
                         if(rret > 0){
                                 process_msg(client != NULL,conns,&mess,rret,tun_fd,host);
@@ -299,7 +301,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                                 int ret = quicly_send(conns[i],dgrams,&num_dgrams);
                                 switch(ret){
                                 case 0:{
-                                                send_one(sock_fd,dgrams[j]);
+                                                send_one(sock_fd,dgrams[i]);
                                                 ctx.packet_allocator->free_packet(ctx.packet_allocator,dgrams[j]);
                                         }break;
                                 case QUICLY_ERROR_FREE_CONNECTION:
@@ -416,6 +418,7 @@ int main(int argc,char **argv)
                exit(1);
         }
         
+        quicly_conn_t *client = NULL;
         if(is_server()){
                 int reuseaddr = 1;
                 setsocketopt(sock_fd,SOL_SOCKET,SO_REUSEADDR,&reuseaddr,sizeof(reuseaddr));
@@ -424,7 +427,6 @@ int main(int argc,char **argv)
                         exit(1);
                 }
         }
-        quicly_conn_t *client = NULL;
         else{
                 struct sockaddr_in local;
                 memset(&local,0,sizeof(local));
