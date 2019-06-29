@@ -31,24 +31,23 @@ static int is_server(void)
         return ctx.tls->certificates.count != 0;
 }
 
-static int forward_tunfd(quicly_conn_t *conn,int tun_fd)
+static int forward_stdin(quicly_conn_t *conn)
 {
     quicly_stream_t *stream0;
     char buf[4096];
     size_t rret;
 
-    if ((stream0 = quicly_get_stream(conn,0/*or tun_fd*/)) == NULL || !quicly_sendstate_is_open(&stream0->sendstate))
+    if ((stream0 = quicly_get_stream(conn, 0)) == NULL || !quicly_sendstate_is_open(&stream0->sendstate))
         return 0;
-    /*ここでtun_fdからデータを読み込む*/
-    while ((rret = read(tun_fd, buf, sizeof(buf))) == -1 && errno == EINTR)
+
+    while ((rret = read(0, buf, sizeof(buf))) == -1 && errno == EINTR)
         ;
     if (rret == 0) {
-        /* tun_fd closed, close the send-side of stream0 */
+        /* stdin closed, close the send-side of stream0 */
         quicly_streambuf_egress_shutdown(stream0);
         return 0;
     } else {
         /* write data to send buffer */
-        /*ここで書き込む*/
         quicly_streambuf_egress_write(stream0, buf, rret);
         return 1;
     }
@@ -210,8 +209,6 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
         quicly_conn_t *conns[256] = {client};
         size_t i;
         int max_fd;
-        int read_stdin = client != NULL;
-
 
         while(1){
                         fd_set readfds;
@@ -243,40 +240,52 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                 
                 /*read data from tun_fd and pack it in quic packet*/
                 if(FD_ISSET(tun_fd,&readfds)){
-                        assert(client != NULL);
-                        if(!forward_tunfd(client,tun_fd)){
-                            read_stdin = 0;
-                        }
+                        uint8_t buf[4096];
+                        struct msghdr mess;
+                        struct sockaddr sa;
+                        struct iovec vec;
+                        memset(&mess, 0, sizeof(mess));
+                        mess.msg_name = &sa;
+                        mess.msg_namelen = sizeof(sa);
+                        vec.iov_base = buf;
+                        vec.iov_len = sizeof(buf);
+                        mess.msg_iov = &vec;
+                        mess.msg_iovlen = 1;
+                        ssize_t rret;
 
-                        for(i=0;conns[i] != NULL;++i){
-                            quicly_datagram_t *dgrams[i];
-                            /*dgrams[i]->data.base = buf;
-                            dgrams[i]->data.len = sizeof(buf);*/
-                            size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
-                            int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
-                            switch(ret){
-                                case 0:{
-                                    size_t j;
-                                    for (j = 0; j != num_dgrams; ++j) {
-                                        send_one(sock_fd, dgrams[j]);
-                                        ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
-                                    }
-                                }break;
-                                case QUICLY_ERROR_FREE_CONNECTION:
-                                    quicly_free(conns[i]);
-                                    memmove(conns + i,conns+i+1,sizeof(conns)-sizeof(conns[0])*(i+1));
-                                    i--;
-                                    if(!is_server())
-                                        return 0;
-                                    break;
-                                default:
-                                    fprintf(stderr,"quicly_send returned %d\n",ret);
-                                    return 1;
-                            }
+                        while(((rret = recvmsg(tun_fd,&mess,0)) == -1 && errno == EINTR))
+                                ;
+                        if(rret > 0){
+                                for(i=0;conns[i] != NULL;++i){
+                                        quicly_datagram_t *dgrams[i];
+                                        dgrams[i]->data.base = buf;
+                                        dgrams[i]->data.len = sizeof(buf);
+                                        size_t num_dgrams = 1;
+                                        int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
+                                        switch(ret){
+                                        case 0:{
+                                                size_t j;
+                                                for (j = 0; j != num_dgrams; ++j) {
+                                                        send_one(sock_fd, dgrams[j]);
+                                                        ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
+                                                }
+                                        }break;
+                                        case QUICLY_ERROR_FREE_CONNECTION:
+                                                quicly_free(conns[i]);
+                                                memmove(conns + i,conns+i+1,sizeof(conns)-sizeof(conns[0])*(i+1));
+                                                i--;
+                                                if(!is_server())
+                                                        return 0;
+                                                break;
+                                        default:
+                                                fprintf(stderr,"quicly_send returned %d\n",ret);
+                                                return 1;
+                                        }
+                                }
                         }
                 }
                 if(FD_ISSET(sock_fd,&readfds)){
-                        uint8_t buf[1500];
+                        uint8_t buf[4096];
                         struct msghdr mess;
                         struct sockaddr sa;
                         struct iovec vec;
@@ -297,7 +306,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         
                         for(i=0;conns[i] != NULL;++i){
                                 quicly_datagram_t *dgrams[i];
-                                size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
+                                size_t num_dgrams = 1;
                                 int ret = quicly_send(conns[i],dgrams,&num_dgrams);
                                 switch(ret){
                                 case 0:{
