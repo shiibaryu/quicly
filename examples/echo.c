@@ -115,7 +115,7 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
     return 0;
 }
 
-static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg, size_t dgram_len,char tun_ifname)
+static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg, size_t dgram_len)
 {
     size_t off, packet_len, i;
 
