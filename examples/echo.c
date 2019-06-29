@@ -73,7 +73,7 @@ static int on_receive_reset(quicly_stream_t *stream, int err)
 static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len)
 {
     int ret;
-    struct iphdr *iphdr;
+    int wlen;
 
     /* read input to receive buffer */
     if ((ret = quicly_streambuf_ingress_receive(stream, off, src, len)) != 0)
@@ -84,7 +84,11 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
 
     if (is_server()) {
         /* server: echo back to the client */
-        write(tun_fd,input.base,input.len);
+        wlen = write(tun_fd,input.base,input.len);
+        if(wlen < 0){
+                perror("write");
+                return -1;
+        }
         if (quicly_sendstate_is_open(&stream->sendstate)) {
             quicly_streambuf_egress_write(stream, input.base, input.len);
             /* shutdown the stream after echoing all data */
@@ -93,7 +97,11 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
         }
     } else {
         /* client: print to stdout */
-        write(tun_fd,input.base,input.len);
+        wlen = write(tun_fd,input.base,input.len);
+        if(wlen < 0){
+                perror("write");
+                return -1;
+        }
         /*fwrite(input.base, 1, input.len, stdout);
         fflush(stdout);*/
         /* initiate connection close after receiving all data */
@@ -210,13 +218,12 @@ static int on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream)
 }
 
 
-static int run_ipoc(int sock_fd,char tun_ifname,quicly_conn_t *client)
+static int run_ipoc(int sock_fd,quicly_conn_t *client)
 {
         quicly_conn_t *conns[256] = {client};
         size_t i;
         int max_fd;
-        int read_stdin = client != NULL;
-
+        int ret;
 
         while(1){
                         fd_set readfds;
@@ -248,9 +255,7 @@ static int run_ipoc(int sock_fd,char tun_ifname,quicly_conn_t *client)
                 /*read data from tun_fd and pack it in quic packet*/
                 if(FD_ISSET(tun_fd,&readfds)){
                         assert(client != NULL);
-                        if(!forward_tunfd(client)){
-                            read_stdin = 0;
-                        }
+                        ret = forward_tunfd(client)){
                         for(i=0;conns[i] != NULL;++i){
                             quicly_datagram_t *dgrams[i];
                             size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
@@ -423,7 +428,7 @@ int main(int argc,char **argv)
         if (resolve_address((struct sockaddr *)&sa, &salen, host, port, AF_INET, SOCK_DGRAM, 0) != 0)
                 exit(1);
 
-        sock_fd = socket(sa.sa_family,SOCK_DGRAM,0);
+        sock_fd = socket(sa.ss_family,SOCK_DGRAM,0);
         if(sock_fd < 0){
                 perror("failed to make a socket");
         }
