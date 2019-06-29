@@ -255,7 +255,7 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                 /*read data from tun_fd and pack it in quic packet*/
                 if(FD_ISSET(tun_fd,&readfds)){
                         assert(client != NULL);
-                        ret = forward_tunfd(client)){
+                        ret = forward_tunfd(client){
                         for(i=0;conns[i] != NULL;++i){
                             quicly_datagram_t *dgrams[i];
                             size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
@@ -298,7 +298,7 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                         while(((rret = recvmsg(sock_fd,&mess,0)) == -1 && errno == EINTR))
                                 ;
                         if(rret > 0){
-                                process_msg(client != NULL,conns,&mess,rret,tun_ifname);
+                                process_msg(client != NULL,conns,&mess,rret);
                         }
                         
                         for(i=0;conns[i] != NULL;++i){
