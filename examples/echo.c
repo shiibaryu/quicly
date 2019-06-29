@@ -255,7 +255,7 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                 /*read data from tun_fd and pack it in quic packet*/
                 if(FD_ISSET(tun_fd,&readfds)){
                         assert(client != NULL);
-                        ret = forward_tunfd(client){
+                        ret = forward_tunfd(client);
                         for(i=0;conns[i] != NULL;++i){
                             quicly_datagram_t *dgrams[i];
                             size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
