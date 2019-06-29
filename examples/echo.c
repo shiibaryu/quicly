@@ -117,7 +117,6 @@ static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg
     }
 }
 
-
 static int resolve_address(struct sockaddr *sa, socklen_t *salen, const char *host, const char *port, int family, int type,
                            int proto)
 {
@@ -135,8 +134,6 @@ static int resolve_address(struct sockaddr *sa, socklen_t *salen, const char *ho
         return -1;
     }
 }
-
-   
 
 int tun_alloc(char *dev)
 {
@@ -248,15 +245,15 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         if(rret > 0){
                                 for(i=0;conns[i] != NULL;++i){
                                         quicly_datagram_t *dgrams[i];
-                                        dgrams->data.base = buf;
-                                        dgrams->data.len = sizeof(buf);
+                                        dgrams[i]->data.base = buf;
+                                        dgrams[i]->data.len = sizeof(buf);
                                         size_t num_dgrams = 1;
                                         int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
                                         switch(ret){
                                         case 0:{
                                                 size_t j;
                                                 for (j = 0; j != num_dgrams; ++j) {
-                                                        send_one(fd, dgrams[j]);
+                                                        send_one(sock_fd, dgrams[j]);
                                                         ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
                                                 }
                                         }break;
@@ -302,7 +299,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                                 case 0:{
                                         size_t j;
                                         for (j = 0; j != num_dgrams; ++j) {
-                                                send_one(fd, dgrams[j]);
+                                                send_one(sock_fd, dgrams[j]);
                                                 ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
                                         }
                                 }break;
@@ -419,7 +416,7 @@ int main(int argc,char **argv)
         
         if(is_server()){
                 int reuseaddr = 1;
-                setsocketopt(sock_fd,SOL_SOCKET,SO_REUSEADDR,&reuseaddr,sizeof(reuseaddr));
+                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
                 if(bind(sock_fd,(struct sockaddr *)&sa,salen) != 0){
                         perror("failed to bind\n");
                         exit(1);
@@ -443,5 +440,5 @@ int main(int argc,char **argv)
                 quicly_stream_t *stream; /* we retain the opened stream via the on_stream_open callback */
                 quicly_open_stream(client, &stream, 0);
         }
-        return run_ipoc(sock_fd,tun_fd,(unsigned int)host,client);
+        return run_ipoc(sock_fd,tun_fd,host,client);
 }
