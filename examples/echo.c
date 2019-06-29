@@ -26,18 +26,20 @@ static quicly_context_t ctx;
 
 static quicly_cid_plaintext_t next_cid;
 
+static int tun_fd;
+
 static int is_server(void)
 {
         return ctx.tls->certificates.count != 0;
 }
 
-static int forward_tunfd(quicly_conn_t *conn,int tun_fd)
+static int forward_tunfd(quicly_conn_t *conn)
 {
     quicly_stream_t *stream0;
     char buf[4096];
     size_t rret;
 
-    if ((stream0 = quicly_get_stream(conn,0/*or tun_fd*/)) == NULL || !quicly_sendstate_is_open(&stream0->sendstate))
+    if ((stream0 = quicly_get_stream(conn,0)) == NULL || !quicly_sendstate_is_open(&stream0->sendstate))
         return 0;
     /*ここでtun_fdからデータを読み込む*/
     while ((rret = read(tun_fd, buf, sizeof(buf))) == -1 && errno == EINTR)
@@ -71,6 +73,7 @@ static int on_receive_reset(quicly_stream_t *stream, int err)
 static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len)
 {
     int ret;
+    struct iphdr *iphdr;
 
     /* read input to receive buffer */
     if ((ret = quicly_streambuf_ingress_receive(stream, off, src, len)) != 0)
@@ -81,6 +84,7 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
 
     if (is_server()) {
         /* server: echo back to the client */
+        write(tun_fd,input.base,input.len);
         if (quicly_sendstate_is_open(&stream->sendstate)) {
             quicly_streambuf_egress_write(stream, input.base, input.len);
             /* shutdown the stream after echoing all data */
@@ -89,8 +93,9 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
         }
     } else {
         /* client: print to stdout */
-        fwrite(input.base, 1, input.len, stdout);
-        fflush(stdout);
+        write(tun_fd,input.base,input.len);
+        /*fwrite(input.base, 1, input.len, stdout);
+        fflush(stdout);*/
         /* initiate connection close after receiving all data */
         if (quicly_recvstate_transfer_complete(&stream->recvstate))
             quicly_close(stream->conn, 0, "");
@@ -102,7 +107,7 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
     return 0;
 }
 
-static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg, size_t dgram_len,int tun_fd,unsigned int host)
+static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg, size_t dgram_len,char tun_ifname)
 {
     size_t off, packet_len, i;
 
@@ -117,7 +122,7 @@ static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg
                 break;
         if (conns[i] != NULL) {
             /* let the current connection handle ingress packets */
-            ipoc_receive(conns[i], &decoded,tun_fd,host);
+            quicly_receive(conns[i], &decoded);
         } else if (!is_client) {
             /* assume that the packet is a new connection */
             quicly_accept(conns + i, &ctx, msg->msg_name, msg->msg_namelen, &decoded, ptls_iovec_init(NULL, 0), &next_cid, NULL);
@@ -205,7 +210,7 @@ static int on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream)
 }
 
 
-static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *client)
+static int run_ipoc(int sock_fd,char tun_ifname,quicly_conn_t *client)
 {
         quicly_conn_t *conns[256] = {client};
         size_t i;
@@ -240,14 +245,12 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         FD_SET(sock_fd,&readfds);
                         FD_SET(tun_fd, &readfds);
                 }while(select(max_fd + 1,&readfds,NULL,NULL,&tv) == -1 && errno == EINTR);
-                
                 /*read data from tun_fd and pack it in quic packet*/
                 if(FD_ISSET(tun_fd,&readfds)){
                         assert(client != NULL);
-                        if(!forward_tunfd(client,tun_fd)){
+                        if(!forward_tunfd(client)){
                             read_stdin = 0;
                         }
-
                         for(i=0;conns[i] != NULL;++i){
                             quicly_datagram_t *dgrams[i];
                             size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
@@ -276,7 +279,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                 if(FD_ISSET(sock_fd,&readfds)){
                         uint8_t buf[1500];
                         struct msghdr mess;
-                        struct sockaddr sa;
+                        struct sockaddr_storage sa;
                         struct iovec vec;
                         memset(&mess, 0, sizeof(mess));
                         mess.msg_name = &sa;
@@ -290,7 +293,7 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
                         while(((rret = recvmsg(sock_fd,&mess,0)) == -1 && errno == EINTR))
                                 ;
                         if(rret > 0){
-                                process_msg(client != NULL,conns,&mess,rret,tun_fd,host);
+                                process_msg(client != NULL,conns,&mess,rret,tun_ifname);
                         }
                         
                         for(i=0;conns[i] != NULL;++i){
@@ -341,13 +344,12 @@ static void usage(const char *progname)
 
 int main(int argc,char **argv)
 {
-        int sock_fd,tun_fd;
+        int sock_fd;
         int option;
-        char ifname[IFNAMSIZ] = "";
+        char tun_ifname[IFNAMSIZ] = "";
         char *host = "127.0.0.1";
-        /*unsigned int host;*/
         char *port = "3000";
-        struct sockaddr sa;
+        struct sockaddr_storage sa;
         socklen_t salen;
         
         ptls_openssl_sign_certificate_t sign_certificate;
@@ -366,7 +368,7 @@ int main(int argc,char **argv)
         quicly_amend_ptls_context(ctx.tls);
         ctx.stream_open = &stream_open;
         
-        while((option = getopt(argc,argv,"c:k:i:p:h:d")) != 0){
+        while((option = getopt(argc,argv,"c:k:i:p:h:t")) != 0){
                 switch(option){
                         case 'c': /* load certificate chain */ {
                                 int ret;
@@ -392,12 +394,12 @@ int main(int argc,char **argv)
                                 tlsctx.sign_certificate = &sign_certificate.super;
                         }break;
                         case 'i':
-                                strncpy(ifname,optarg,IFNAMSIZ-1);
+                                strncpy(tun_ifname,optarg,IFNAMSIZ-1);
                                 break;
                         case 'p':
                                 port = optarg;
                                 break;
-                        case 'd':
+                        case 't':
                                 host = optarg;
                                 break;
                         case 'h':
@@ -421,13 +423,12 @@ int main(int argc,char **argv)
         if (resolve_address((struct sockaddr *)&sa, &salen, host, port, AF_INET, SOCK_DGRAM, 0) != 0)
                 exit(1);
 
-
         sock_fd = socket(sa.sa_family,SOCK_DGRAM,0);
         if(sock_fd < 0){
                 perror("failed to make a socket");
         }
 
-        tun_fd = tun_alloc(ifname);
+        tun_fd = tun_alloc(tun_ifname);
         if(tun_fd < 0){
                printf("failed to connect tun/tap interface");
                exit(1);
@@ -459,6 +460,5 @@ int main(int argc,char **argv)
                 quicly_stream_t *stream; /* we retain the opened stream via the on_stream_open callback */
                 quicly_open_stream(client, &stream, 0);
         }
-        host = atoi(host);
-        return run_ipoc(sock_fd,tun_fd,host,client);
+        return run_ipoc(sock_fd,client);
 }

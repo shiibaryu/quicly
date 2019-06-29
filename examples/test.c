@@ -164,6 +164,40 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
     return 0;
 }
 
+static int ipoc_on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len)
+{
+    int ret;
+
+    /* read input to receive buffer */
+    if ((ret = quicly_streambuf_ingress_receive(stream, off, src, len)) != 0)
+        return ret;
+
+    /* obtain contiguous bytes from the receive buffer */
+    ptls_iovec_t input = quicly_streambuf_ingress_get(stream);
+
+    if (is_server()) {
+        /* server: echo back to the client */
+        if (quicly_sendstate_is_open(&stream->sendstate)) {
+            quicly_streambuf_egress_write(stream, input.base, input.len);
+            /* shutdown the stream after echoing all data */
+            if (quicly_recvstate_transfer_complete(&stream->recvstate))
+                quicly_streambuf_egress_shutdown(stream);
+        }
+    } else {
+        /* client: print to stdout */
+        fwrite(input.base, 1, input.len, stdout);
+        fflush(stdout);
+        /* initiate connection close after receiving all data */
+        if (quicly_recvstate_transfer_complete(&stream->recvstate))
+            quicly_close(stream->conn, 0, "");
+    }
+
+    /* remove used bytes from receive buffer */
+    quicly_streambuf_ingress_shift(stream, input.len);
+
+    return 0;
+}
+
 static void process_msg(int is_client, quicly_conn_t **conns, struct msghdr *msg, size_t dgram_len)
 {
     size_t off, packet_len, i;
@@ -234,7 +268,7 @@ static int run_loop(int fd, quicly_conn_t *client)
         } while (select(fd + 1, &readfds, NULL, NULL, &tv) == -1 && errno == EINTR);
 
         /* read the QUIC fd */
-        if (FD_ISSET(fd, &readfds)) {
+        /*if (FD_ISSET(fd, &readfds)) {
             uint8_t buf[4096];
             struct sockaddr_storage sa;
             struct iovec vec = {.iov_base = buf, .iov_len = sizeof(buf)};
@@ -244,7 +278,7 @@ static int run_loop(int fd, quicly_conn_t *client)
                 ;
             if (rret > 0)
                 process_msg(client != NULL, conns, &msg, rret);
-        }
+        }*/
 
         /* read stdin, send the input to the active stram */
         if (FD_ISSET(0, &readfds)) {

@@ -839,10 +839,6 @@ int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet);
 /**
  *
  */
-int ipoc_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet,int tun_fd,unsigned int host);
-/**
- *
- */
 int quicly_is_destination(quicly_conn_t *conn, struct sockaddr *sa, socklen_t salen, quicly_decoded_packet_t *decoded);
 /**
  *
