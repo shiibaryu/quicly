@@ -250,6 +250,8 @@ static int run_ipoc(int sock_fd,int tun_fd,unsigned int host,quicly_conn_t *clie
 
                         for(i=0;conns[i] != NULL;++i){
                             quicly_datagram_t *dgrams[i];
+                            /*dgrams[i]->data.base = buf;
+                            dgrams[i]->data.len = sizeof(buf);*/
                             size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
                             int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
                             switch(ret){
