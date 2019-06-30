@@ -209,10 +209,10 @@ int tun_alloc(char *dev, int flags)
                 strncpy(ifr.ifr_name,dev,IFNAMSIZ);
         }     
 
-        ret = ioctl(fd,TUNSETIFF,(void *)&ifr);
+        ret = ioctl(tun_fd,TUNSETIFF,(void *)&ifr);
         if(ret < 0){
                 perror("ioctl(TUNSETIFF)");
-                close(fd);
+                close(tun_fd);
                 return ret;
         }
 
@@ -366,7 +366,6 @@ int main(int argc,char **argv)
 {
         int sock_fd;
         int ch;
-        char tun_ifname[IFNAMSIZ] = "";
         char *host = "127.0.0.1";
         char *port = "3000";
         struct sockaddr_storage sa;
@@ -388,7 +387,7 @@ int main(int argc,char **argv)
         quicly_amend_ptls_context(ctx.tls);
         ctx.stream_open = &stream_open;
         
-        while ((ch = getopt(argc, argv, "c:k:p:Eh:i")) != -1) {
+        while ((ch = getopt(argc, argv, "c:k:p:Eh")) != -1) {
         switch (ch) {
         case 'c': /* load certificate chain */ {
             int ret;
