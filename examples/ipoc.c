@@ -351,7 +351,7 @@ static void usage()
 int main(int argc,char **argv)
 {
         int sock_fd;
-        int option;
+        int ch;
         char tun_ifname[IFNAMSIZ] = "";
         char *host = "127.0.0.1";
         char *port = "3000";
@@ -374,39 +374,46 @@ int main(int argc,char **argv)
         quicly_amend_ptls_context(ctx.tls);
         ctx.stream_open = &stream_open;
         
-        while((option = getopt(argc,argv,"c:k:i:h")) != 0){
-                switch(option){
-                        case 'c': /* load certificate chain */ {
-                                int ret;
-                                if ((ret = ptls_load_certificates(&tlsctx, optarg)) != 0) {
-                                        fprintf(stderr, "failed to load certificates from file %s:%d\n", optarg, ret);
-                                        exit(1);
-                                }
-                        }break;
-                        case 'k': /* load private key */ {
-                                FILE *fp;
-                                if ((fp = fopen(optarg, "r")) == NULL) {
-                                        fprintf(stderr, "failed to open file:%s:%s\n", optarg, strerror(errno));
-                                        exit(1);
-                                }
-                                EVP_PKEY *pkey = PEM_read_PrivateKey(fp, NULL, NULL, NULL);
-                                fclose(fp);
-                                if (pkey == NULL) {
-                                        fprintf(stderr, "failed to load private key from file:%s\n", optarg);
-                                        exit(1);
-                                }
-                                ptls_openssl_init_sign_certificate(&sign_certificate, pkey);
-                                EVP_PKEY_free(pkey);
-                                tlsctx.sign_certificate = &sign_certificate.super;
-                        }break;
-                        case 'i':
-                                strncpy(tun_ifname,optarg,IFNAMSIZ-1);
-                                break;
-                        case 'h':
-                                usage();
-                                break;
-                }
+        while ((ch = getopt(argc, argv, "c:k:p:Eh")) != -1) {
+        switch (ch) {
+        case 'c': /* load certificate chain */ {
+            int ret;
+            if ((ret = ptls_load_certificates(&tlsctx, optarg)) != 0) {
+                fprintf(stderr, "failed to load certificates from file %s:%d\n", optarg, ret);
+                exit(1);
+            }
+        } break;
+        case 'k': /* load private key */ {
+            FILE *fp;
+            if ((fp = fopen(optarg, "r")) == NULL) {
+                fprintf(stderr, "failed to open file:%s:%s\n", optarg, strerror(errno));
+                exit(1);
+            }
+            EVP_PKEY *pkey = PEM_read_PrivateKey(fp, NULL, NULL, NULL);
+            fclose(fp);
+            if (pkey == NULL) {
+                fprintf(stderr, "failed to load private key from file:%s\n", optarg);
+                exit(1);
+            }
+            ptls_openssl_init_sign_certificate(&sign_certificate, pkey);
+            EVP_PKEY_free(pkey);
+            tlsctx.sign_certificate = &sign_certificate.super;
+        } break;
+        case 'p': /* port */
+            port = optarg;
+            break;
+        case 'E': /* event logging */
+            ctx.event_log.cb = quicly_new_default_event_logger(stderr);
+            ctx.event_log.mask = UINT64_MAX;
+            break;
+        case 'h': /* help */
+            usage(argv[0]);
+            break;
+        default:
+            exit(1);
+            break;
         }
+    }
         
         if((tlsctx.certificates.count != 0) != (tlsctx.sign_certificate != NULL)){
                 fprintf(stderr,"-c and -k options must be used together\n");
