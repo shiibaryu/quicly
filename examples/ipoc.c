@@ -247,8 +247,8 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
         int ret;
 
         while(1){
-                        fd_set readfds;
-                        struct timeval tv;
+                    fd_set readfds;
+                    struct timeval tv;
                 do {
                         int64_t first_timeout = INT64_MAX, now = ctx.now->cb(ctx.now);
                         for (i = 0; conns[i] != NULL; ++i) {
@@ -275,6 +275,12 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                         FD_SET(0, &readfds);
                 }while(select(max_fd + 1,&readfds,NULL,NULL,&tv) == -1 && errno == EINTR);
                 /*read data from tun_fd and pack it in quic packet*/
+                if (FD_ISSET(0, &readfds)) {
+                    assert(client != NULL);
+                    if (!forward_stdin(client)){
+                        read_stdin = 0;
+                    }
+                }
                 if(FD_ISSET(tun_fd,&readfds)){
                         assert(client != NULL);
                         ret = forward_tunfd(client);
@@ -299,14 +305,6 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                                 process_msg(client != NULL,conns,&mess,rret);
                         }
                 }
-
-                if (FD_ISSET(0, &readfds)) {
-                    assert(client != NULL);
-                    if (!forward_stdin(client)){
-                        read_stdin = 0;
-                    }
-                }
-
                 for(i=0;conns[i] != NULL;++i){
                                 quicly_datagram_t *dgrams[i];
                                 size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
@@ -366,7 +364,7 @@ int main(int argc,char **argv)
         ptls_context_t tlsctx = {
                 .random_bytes   = ptls_openssl_random_bytes,
                 .get_time       = &ptls_get_time,
-                .key_exchanges   = ptls_openssl_key_exchanges,
+                .key_exchanges  = ptls_openssl_key_exchanges,
                 .cipher_suites  = ptls_openssl_cipher_suites,
         };
 
