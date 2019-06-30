@@ -32,6 +32,27 @@ static int is_server(void)
 {
         return ctx.tls->certificates.count != 0;
 }
+static int forward_stdin(quicly_conn_t *conn)
+{
+    quicly_stream_t *stream0;
+    char buf[4096];
+    size_t rret;
+
+    if ((stream0 = quicly_get_stream(conn, 0)) == NULL || !quicly_sendstate_is_open(&stream0->sendstate))
+        return 0;
+
+    while ((rret = read(0, buf, sizeof(buf))) == -1 && errno == EINTR)
+        ;
+    if (rret == 0) {
+        /* stdin closed, close the send-side of stream0 */
+        quicly_streambuf_egress_shutdown(stream0);
+        return 0;
+    } else {
+        /* write data to send buffer */
+        quicly_streambuf_egress_write(stream0, buf, rret);
+        return 1;
+    }
+}
 
 static int forward_tunfd(quicly_conn_t *conn)
 {
@@ -251,35 +272,12 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                         FD_ZERO(&readfds);
                         FD_SET(sock_fd,&readfds);
                         FD_SET(tun_fd, &readfds);
+                        FD_SET(0, &readfds);
                 }while(select(max_fd + 1,&readfds,NULL,NULL,&tv) == -1 && errno == EINTR);
                 /*read data from tun_fd and pack it in quic packet*/
                 if(FD_ISSET(tun_fd,&readfds)){
                         assert(client != NULL);
                         ret = forward_tunfd(client);
-                        for(i=0;conns[i] != NULL;++i){
-                            quicly_datagram_t *dgrams[i];
-                            size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
-                            int ret =  quicly_send(conns[i],dgrams,&num_dgrams);
-                            switch(ret){
-                                case 0:{
-                                    size_t j;
-                                    for (j = 0; j != num_dgrams; ++j) {
-                                        send_one(sock_fd, dgrams[j]);
-                                        ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
-                                    }
-                                }break;
-                                case QUICLY_ERROR_FREE_CONNECTION:
-                                    quicly_free(conns[i]);
-                                    memmove(conns + i,conns+i+1,sizeof(conns)-sizeof(conns[0])*(i+1));
-                                    i--;
-                                    if(!is_server())
-                                        return 0;
-                                    break;
-                                default:
-                                    fprintf(stderr,"quicly_send returned %d\n",ret);
-                                    return 1;
-                            }
-                        }
                 }
                 if(FD_ISSET(sock_fd,&readfds)){
                         uint8_t buf[1500];
@@ -300,8 +298,16 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                         if(rret > 0){
                                 process_msg(client != NULL,conns,&mess,rret);
                         }
-                        
-                        for(i=0;conns[i] != NULL;++i){
+                }
+
+                if (FD_ISSET(0, &readfds)) {
+                    assert(client != NULL);
+                    if (!forward_stdin(client)){
+                        read_stdin = 0;
+                    }
+                }
+
+                for(i=0;conns[i] != NULL;++i){
                                 quicly_datagram_t *dgrams[i];
                                 size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
                                 int ret = quicly_send(conns[i],dgrams,&num_dgrams);
@@ -324,7 +330,6 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                                        fprintf(stderr,"quicly_send returned %d\n",ret);
                                        return 1;
                                 }
-                       }
                 }
         }
 
@@ -343,8 +348,7 @@ static void usage()
            "  -h           prints this help\n"
            "\n"
            "When both `-c` and `-k` is specified, runs as a server.  Otherwise, runs as a\n"
-           "client connecting to host:port.  If omitted, host defaults to 127.0.0.1.\n"
-           ;
+           "client connecting to host:port.  If omitted, host defaults to 127.0.0.1.\n");
     exit(0);
 }
 
@@ -407,7 +411,7 @@ int main(int argc,char **argv)
             ctx.event_log.mask = UINT64_MAX;
             break;
         case 'h': /* help */
-            usage(argv[0]);
+            usage();
             break;
         default:
             exit(1);
