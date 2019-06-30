@@ -22,11 +22,14 @@
 #include "quicly/defaults.h"
 #include "quicly/streambuf.h"
 
+#define TUN_UP 0x0001
+
 static quicly_context_t ctx;
 
 static quicly_cid_plaintext_t next_cid;
 
 static int tun_fd;
+static unsigned short tun_flag;
 
 static int is_server(void)
 {
@@ -105,10 +108,12 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
 
     if (is_server()) {
         /* server: echo back to the client */
-        wlen = write(tun_fd,input.base,input.len);
-        if(wlen < 0){
+        if(tun_flag == TUN_UP){
+            wlen = write(tun_fd,input.base,input.len);
+            if(wlen < 0){
                 perror("write");
                 return -1;
+            }
         }
         if (quicly_sendstate_is_open(&stream->sendstate)) {
             quicly_streambuf_egress_write(stream, input.base, input.len);
@@ -118,10 +123,12 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
         }
     } else {
         /* client: print to stdout */
-        wlen = write(tun_fd,input.base,input.len);
-        if(wlen < 0){
+        if(tun_flag == TUN_UP){
+            wlen = write(tun_fd,input.base,input.len);
+            if(wlen < 0){
                 perror("write");
                 return -1;
+            }
         }
         fwrite(input.base, 1, input.len, stdout);
         fflush(stdout);
@@ -183,7 +190,7 @@ static int resolve_address(struct sockaddr *sa, socklen_t *salen, const char *ho
     return 0;
 }
 
-int tun_alloc(char *dev)
+int tun_alloc(char *dev, int flags)
 {
         struct ifreq ifr;
         int fd,ret;
@@ -196,7 +203,7 @@ int tun_alloc(char *dev)
         
         memset(&ifr,0,sizeof(ifr));
         
-        ifr.ifr_flags = IFF_TUN;
+        ifr.ifr_flags = flags;
         
         if(*dev){
                 strncpy(ifr.ifr_name,dev,IFNAMSIZ);
@@ -245,6 +252,7 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
         size_t i;
         int max_fd;
         int ret;
+        int read_stdin = client != NULL;
 
         while(1){
                     fd_set readfds;
@@ -276,13 +284,16 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                 }while(select(max_fd + 1,&readfds,NULL,NULL,&tv) == -1 && errno == EINTR);
                 /*read data from tun_fd and pack it in quic packet*/
                 if (FD_ISSET(0, &readfds)) {
+                    if(tun_flag == TUN_UP){
+                        tun_flag = 0;
+                    }
                     assert(client != NULL);
                     if (!forward_stdin(client)){
                         read_stdin = 0;
                     }
                 }
                 if(FD_ISSET(tun_fd,&readfds)){
-                        assert(client != NULL);
+                        tun_flag = TUN_UP;
                         ret = forward_tunfd(client);
                 }
                 if(FD_ISSET(sock_fd,&readfds)){
@@ -306,29 +317,30 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                         }
                 }
                 for(i=0;conns[i] != NULL;++i){
-                                quicly_datagram_t *dgrams[i];
-                                size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
-                                int ret = quicly_send(conns[i],dgrams,&num_dgrams);
-                                switch(ret){
-                                case 0:{
-                                        size_t j;
-                                        for (j = 0; j != num_dgrams; ++j) {
-                                                send_one(sock_fd, dgrams[j]);
-                                                ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
-                                        }
-                                }break;
-                                case QUICLY_ERROR_FREE_CONNECTION:
-                                       quicly_free(conns[i]);
-                                       memmove(conns + i,conns+i+1,sizeof(conns)-sizeof(conns[0])*(i+1));
-                                       i--;
-                                       if(!is_server())
-                                            return 0;
-                                       break;
-                               default:
-                                       fprintf(stderr,"quicly_send returned %d\n",ret);
-                                       return 1;
+                        quicly_datagram_t *dgrams[16];
+                        size_t num_dgrams = sizeof(dgrams) / sizeof(dgrams[0]);
+                        int ret = quicly_send(conns[i],dgrams,&num_dgrams);
+                        switch(ret){
+                            case 0:{
+                                size_t j;
+                                for (j = 0; j != num_dgrams; ++j) {
+                                        send_one(sock_fd, dgrams[j]);
+                                        ctx.packet_allocator->free_packet(ctx.packet_allocator, dgrams[j]);
                                 }
+                            }break;
+                            case QUICLY_ERROR_FREE_CONNECTION:
+                                quicly_free(conns[i]);
+                                memmove(conns + i,conns+i+1,sizeof(conns)-sizeof(conns[0])*(i+1));
+                                i--;
+                                if(!is_server())
+                                    return 0;
+                                break;
+                            default:
+                                fprintf(stderr,"quicly_send returned %d\n",ret);
+                                return 1;
+                        }
                 }
+
         }
 
         return 0;
@@ -376,7 +388,7 @@ int main(int argc,char **argv)
         quicly_amend_ptls_context(ctx.tls);
         ctx.stream_open = &stream_open;
         
-        while ((ch = getopt(argc, argv, "c:k:p:Eh")) != -1) {
+        while ((ch = getopt(argc, argv, "c:k:p:Eh:i")) != -1) {
         switch (ch) {
         case 'c': /* load certificate chain */ {
             int ret;
@@ -437,7 +449,7 @@ int main(int argc,char **argv)
                 perror("failed to make a socket");
         }
 
-        tun_fd = tun_alloc(tun_ifname);
+        tun_fd = tun_alloc("tun0", IFF_TUN | IFF_NO_PI);
         if(tun_fd < 0){
                printf("failed to connect tun/tap interface");
                exit(1);
