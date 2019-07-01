@@ -22,14 +22,14 @@
 #include "quicly/defaults.h"
 #include "quicly/streambuf.h"
 
-#define TUN_UP 0x0001
-
+#define SOCK_UP 0x0001
 static quicly_context_t ctx;
 
 static quicly_cid_plaintext_t next_cid;
 
 static int tun_fd;
-static unsigned short tun_flag;
+static int sock_fd;
+static unsigned short flag;
 
 static int is_server(void)
 {
@@ -108,7 +108,7 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
 
     if (is_server()) {
         /* server: echo back to the client */
-        if(tun_flag == TUN_UP){
+        if(flag == SOCK_UP){
             wlen = write(tun_fd,input.base,input.len);
             if(wlen < 0){
                 perror("write");
@@ -122,8 +122,7 @@ static int on_receive(quicly_stream_t *stream, size_t off, const void *src, size
                 quicly_streambuf_egress_shutdown(stream);
         }
     } else {
-        /* client: print to stdout */
-        if(tun_flag == TUN_UP){
+        if(flag == SOCK_UP){
             wlen = write(tun_fd,input.base,input.len);
             if(wlen < 0){
                 perror("write");
@@ -196,9 +195,9 @@ int tun_alloc(char *dev, int flags)
         int fd,ret;
         char *i_dev = "/dev/net/tun";
         
-        if((fd = open(i_dev,O_RDWR)) <0){
+        if((tun_fd = open(i_dev,O_RDWR)) <0){
                 perror("failed to open tun");
-                return fd;
+                return tun_fd;
         }
         
         memset(&ifr,0,sizeof(ifr));
@@ -215,10 +214,9 @@ int tun_alloc(char *dev, int flags)
                 close(tun_fd);
                 return ret;
         }
-
         strcpy(dev,ifr.ifr_name);
 
-        return fd;
+        return tun_fd;
 }
 
 static int send_one(int fd, quicly_datagram_t *p)
@@ -246,7 +244,7 @@ static int on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream)
 }
 
 
-static int run_ipoc(int sock_fd,quicly_conn_t *client)
+static int run_ipoc(quicly_conn_t *client)
 {
         quicly_conn_t *conns[256] = {client};
         size_t i;
@@ -284,16 +282,13 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                 }while(select(max_fd + 1,&readfds,NULL,NULL,&tv) == -1 && errno == EINTR);
                 /*read data from tun_fd and pack it in quic packet*/
                 if (FD_ISSET(0, &readfds)) {
-                    if(tun_flag == TUN_UP){
-                        tun_flag = 0;
-                    }
                     assert(client != NULL);
                     if (!forward_stdin(client)){
                         read_stdin = 0;
                     }
                 }
                 if(FD_ISSET(tun_fd,&readfds)){
-                        tun_flag = TUN_UP;
+                        flag = TUN_UP;
                         ret = forward_tunfd(client);
                 }
                 if(FD_ISSET(sock_fd,&readfds)){
@@ -313,6 +308,7 @@ static int run_ipoc(int sock_fd,quicly_conn_t *client)
                         while(((rret = recvmsg(sock_fd,&mess,0)) == -1 && errno == EINTR))
                                 ;
                         if(rret > 0){
+                                flag = SOCK_UP;
                                 process_msg(client != NULL,conns,&mess,rret);
                         }
                 }
@@ -364,10 +360,10 @@ static void usage()
 
 int main(int argc,char **argv)
 {
-        int sock_fd;
         int ch;
         char *host = "127.0.0.1";
         char *port = "3000";
+        char tun_ifname[IFNAMSIZ] = "tun0"
         struct sockaddr_storage sa;
         socklen_t salen;
         
@@ -448,7 +444,7 @@ int main(int argc,char **argv)
                 perror("failed to make a socket");
         }
 
-        tun_fd = tun_alloc("tun0", IFF_TUN | IFF_NO_PI);
+        tun_fd = tun_alloc(tun_ifname, IFF_TUN | IFF_NO_PI);
         if(tun_fd < 0){
                printf("failed to connect tun/tap interface");
                exit(1);
@@ -480,5 +476,5 @@ int main(int argc,char **argv)
                 quicly_stream_t *stream; /* we retain the opened stream via the on_stream_open callback */
                 quicly_open_stream(client, &stream, 0);
         }
-        return run_ipoc(sock_fd,client);
+        return run_ipoc(client);
 }
