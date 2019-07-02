@@ -288,7 +288,6 @@ static int run_ipoc(quicly_conn_t *client)
                     }
                 }
                 if(FD_ISSET(tun_fd,&readfds)){
-                        flag = TUN_UP;
                         ret = forward_tunfd(client);
                 }
                 if(FD_ISSET(sock_fd,&readfds)){
